@@ -4633,7 +4633,10 @@ ev_view_button_press_event (GtkWidget      *widget,
 
 	if (!view->document)
 		return FALSE;
-	
+
+	if (gtk_gesture_is_recognized (view->zoom_gesture))
+		return TRUE;
+
 	if (!gtk_widget_has_focus (widget)) {
 		gtk_widget_grab_focus (widget);
 	}
@@ -4954,6 +4957,9 @@ ev_view_motion_notify_event (GtkWidget      *widget,
 	if (!view->document)
 		return FALSE;
 
+	if (gtk_gesture_is_recognized (view->zoom_gesture))
+		return TRUE;
+
 	window = gtk_widget_get_window (widget);
 
         if (event->is_hint || event->window != window) {
@@ -5109,6 +5115,9 @@ ev_view_button_release_event (GtkWidget      *widget,
 	EvLink *link = NULL;
 
 	view->image_dnd_info.in_drag = FALSE;
+
+	if (gtk_gesture_is_recognized (view->zoom_gesture))
+		return TRUE;
 
 	if (view->scroll_info.autoscrolling) {
 		ev_view_autoscroll_stop (view);
@@ -6193,6 +6202,8 @@ ev_view_finalize (GObject *object)
 		g_object_unref (view->image_dnd_info.image);
 	view->image_dnd_info.image = NULL;
 
+	g_object_unref (view->zoom_gesture);
+
 	G_OBJECT_CLASS (ev_view_parent_class)->finalize (object);
 }
 
@@ -6712,6 +6723,33 @@ ev_view_class_init (EvViewClass *class)
 }
 
 static void
+zoom_gesture_begin_cb (GtkGesture       *gesture,
+		       GdkEventSequence *sequence,
+		       EvView           *view)
+{
+	view->prev_zoom_scale = 1;
+}
+
+static void
+zoom_scale_changed_cb (GtkGestureZoom *gesture,
+		       gdouble         scale,
+		       EvView         *view)
+{
+	gdouble factor;
+
+	view->drag_info.in_drag = FALSE;
+	view->image_dnd_info.in_drag = FALSE;
+
+	factor = scale - view->prev_zoom_scale + 1;
+	view->prev_zoom_scale = scale;
+	ev_document_model_set_sizing_mode (view->model, EV_SIZING_FREE);
+
+	if ((factor < 1.0 && ev_view_can_zoom_out (view)) ||
+	    (factor >= 1.0 && ev_view_can_zoom_in (view)))
+		ev_view_zoom (view, factor);
+}
+
+static void
 ev_view_init (EvView *view)
 {
 	GtkStyleContext *context;
@@ -6726,6 +6764,7 @@ ev_view_init (EvView *view)
 	gtk_style_context_add_class (context, "view");
 
 	gtk_widget_set_events (GTK_WIDGET (view),
+			       GDK_TOUCH_MASK |
 			       GDK_EXPOSURE_MASK |
 			       GDK_BUTTON_PRESS_MASK |
 			       GDK_BUTTON_RELEASE_MASK |
@@ -6760,6 +6799,15 @@ ev_view_init (EvView *view)
 	view->pixbuf_cache_size = DEFAULT_PIXBUF_CACHE_SIZE;
 	view->caret_enabled = FALSE;
 	view->cursor_page = 0;
+
+	view->zoom_gesture = gtk_gesture_zoom_new (GTK_WIDGET (view));
+	gtk_event_controller_set_propagation_phase (GTK_EVENT_CONTROLLER (view->zoom_gesture),
+						    GTK_PHASE_CAPTURE);
+
+	g_signal_connect (view->zoom_gesture, "begin",
+			  G_CALLBACK (zoom_gesture_begin_cb), view);
+	g_signal_connect (view->zoom_gesture, "scale-changed",
+			  G_CALLBACK (zoom_scale_changed_cb), view);
 }
 
 /*** Callbacks ***/
