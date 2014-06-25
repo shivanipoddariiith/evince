@@ -51,7 +51,6 @@
 #include "ev-document-images.h"
 #include "ev-document-links.h"
 #include "ev-document-annotations.h"
-#include "ev-document-type-builtins.h"
 #include "ev-document-misc.h"
 #include "ev-file-exporter.h"
 #include "ev-file-helpers.h"
@@ -89,6 +88,7 @@
 #include "ev-zoom-action.h"
 #include "ev-toolbar.h"
 #include "ev-bookmarks.h"
+#include "ev-recent-view.h"
 
 #ifdef ENABLE_DBUS
 #include "ev-gdbus-generated.h"
@@ -181,6 +181,9 @@ struct _EvWindowPrivate {
 	GMenuModel   *attachment_popup_menu;
 	GtkWidget    *attachment_popup;
 	GList        *attach_list;
+
+	/* For bookshelf view of recent items*/
+	EvRecentView *recent_view;
 
 	/* Document */
 	EvDocumentModel *model;
@@ -368,6 +371,10 @@ static void     ev_window_setup_bookmarks               (EvWindow         *windo
 static void     ev_window_show_find_bar                 (EvWindow         *ev_window,
 							 gboolean          restart);
 static void     ev_window_close_find_bar                (EvWindow         *ev_window);
+static void     ev_window_swap_out_recent_view_if_needed (EvWindow         *ev_window);
+static void     recent_view_item_activated_cb           (EvRecentView     *recent_view,
+                                                         const char       *uri,
+                                                         EvWindow         *ev_window);
 
 static gchar *nautilus_sendto = NULL;
 
@@ -406,8 +413,9 @@ ev_window_setup_action_sensitivity (EvWindow *ev_window)
 	gboolean can_get_text = FALSE;
 	gboolean has_pages = FALSE;
 	gboolean can_find = FALSE;
+	GAction  *action;
 
-	if (document) {
+	if (document && !ev_window->priv->recent_view) {
 		has_document = TRUE;
 		has_pages = ev_document_get_n_pages (document) > 0;
 		info = ev_document_get_info (document);
@@ -477,6 +485,11 @@ ev_window_setup_action_sensitivity (EvWindow *ev_window)
 	ev_window_set_action_enabled (ev_window, "add-bookmark",
 					has_pages && ev_window->priv->bookmarks);
 
+	/* Recent View */
+	ev_window_set_action_enabled (ev_window, "recent-view", has_document);
+	action = g_action_map_lookup_action (G_ACTION_MAP (ev_window), "recent-view");
+	g_simple_action_set_state (G_SIMPLE_ACTION (action), g_variant_new_boolean (has_document));
+
         ev_window_update_actions_sensitivity (ev_window);
 }
 
@@ -489,13 +502,20 @@ ev_window_update_actions_sensitivity (EvWindow *ev_window)
 	gboolean presentation_mode;
 	gboolean can_find_in_page = FALSE;
 	gboolean dual_mode = FALSE;
+	gboolean has_document = FALSE;
+	GAction  *action;
 
-	if (ev_window->priv->document) {
+	if (ev_window->priv->document && !ev_window->priv->recent_view) {
+		has_document = TRUE;
 		page = ev_document_model_get_page (ev_window->priv->model);
 		n_pages = ev_document_get_n_pages (ev_window->priv->document);
 		has_pages = n_pages > 0;
 		dual_mode = ev_document_model_get_dual_page (ev_window->priv->model);
 	}
+
+	ev_window_set_action_enabled (ev_window, "recent-view", has_document);
+	action = g_action_map_lookup_action (G_ACTION_MAP (ev_window), "recent-view");
+	g_simple_action_set_state (G_SIMPLE_ACTION (action), g_variant_new_boolean (!has_document));
 
 	can_find_in_page = (ev_window->priv->find_job &&
 			    ev_job_find_has_results (EV_JOB_FIND (ev_window->priv->find_job)));
@@ -1625,9 +1645,11 @@ ev_window_load_job_cb (EvJob *job,
 	g_assert (job_load->uri);
 
 	ev_window_hide_loading_message (ev_window);
+	ev_window_swap_out_recent_view_if_needed (ev_window);
 
 	/* Success! */
 	if (!ev_job_is_failed (job)) {
+
 		ev_document_model_set_document (ev_window->priv->model, document);
 
 #ifdef ENABLE_DBUS
@@ -2156,6 +2178,7 @@ ev_window_open_document (EvWindow       *ev_window,
 	ev_window_close_dialogs (ev_window);
 	ev_window_clear_load_job (ev_window);
 	ev_window_clear_local_uri (ev_window);
+	ev_window_swap_out_recent_view_if_needed (ev_window);
 
 	if (ev_window->priv->monitor) {
 		g_object_unref (ev_window->priv->monitor);
@@ -4052,6 +4075,7 @@ ev_window_run_fullscreen (EvWindow *window)
 
 	if (window->priv->metadata && !ev_window_is_empty (window))
 		ev_metadata_set_boolean (window->priv->metadata, "fullscreen", TRUE);
+	ev_window_update_actions_sensitivity (window);
 }
 
 static void
@@ -4091,6 +4115,7 @@ ev_window_stop_fullscreen (EvWindow *window,
 
 	if (window->priv->metadata && !ev_window_is_empty (window))
 		ev_metadata_set_boolean (window->priv->metadata, "fullscreen", FALSE);
+	ev_window_update_actions_sensitivity (window);
 }
 
 static void
@@ -4536,6 +4561,22 @@ ev_window_cmd_go_backwards (GSimpleAction *action,
 	if (current_page - 10 >= 0) {
 		ev_document_model_set_page (ev_window->priv->model, current_page - 10);
 	}
+}
+
+static void
+ev_window_cmd_toggle_recent_view (GSimpleAction *action,
+                                  GVariant      *parameter,
+                                  gpointer      user_data)
+{
+	EvWindow *ev_window = user_data;
+
+	if (!ev_window->priv->recent_view)
+		ev_window_show_recent_view (ev_window);
+	else {
+		ev_window_swap_out_recent_view_if_needed (ev_window);
+		ev_window_setup_action_sensitivity (ev_window);
+	}
+	return;
 }
 
 static gint
@@ -5016,6 +5057,31 @@ find_sidebar_result_activated_cb (EvFindSidebar *find_sidebar,
 				  EvWindow      *window)
 {
 	ev_view_find_set_result (EV_VIEW (window->priv->view), page, result);
+}
+
+static void
+ev_window_swap_out_recent_view_if_needed (EvWindow *ev_window)
+{
+	if (ev_window->priv->recent_view)
+	{
+		gtk_widget_hide (GTK_WIDGET (ev_window->priv->recent_view));
+		ev_window->priv->recent_view = NULL;
+	}
+	gtk_widget_show (ev_window->priv->hpaned);
+}
+
+static void
+recent_view_item_activated_cb (EvRecentView *recent_view,
+                               const char   *uri,
+                               EvWindow     *ev_window)
+{
+	if (ev_window->priv->uri && g_strcmp0 (ev_window->priv->uri, uri) == 0) {
+		ev_window_swap_out_recent_view_if_needed (ev_window);
+		return;
+	}
+	ev_application_open_uri_at_dest (EV_APP, uri,
+					 gtk_window_get_screen (GTK_WINDOW (ev_window)),
+					 NULL, 0, NULL, gtk_get_current_event_time ());
 }
 
 static void
@@ -5694,6 +5760,7 @@ static const GActionEntry actions[] = {
 	{ "escape", ev_window_cmd_escape },
 	{ "open-menu", ev_window_cmd_action_menu },
 	{ "caret-navigation", NULL, NULL, "false", ev_window_cmd_view_toggle_caret_navigation },
+	{ "recent-view", NULL, NULL, "false", ev_window_cmd_toggle_recent_view },
 
 	/* Popups specific items */
 	{ "open-link", ev_window_popup_cmd_open_link },
@@ -6761,7 +6828,7 @@ ev_window_init (EvWindow *ev_window)
 	gtk_box_pack_start (GTK_BOX (ev_window->priv->main_box),
 			    ev_window->priv->find_bar,
 			    FALSE, TRUE, 0);
-
+	
 	/* Add the main area */
 	ev_window->priv->hpaned = gtk_paned_new (GTK_ORIENTATION_HORIZONTAL);
 	g_signal_connect (ev_window->priv->hpaned,
@@ -7072,6 +7139,34 @@ ev_window_new (void)
 					      NULL));
 
 	return ev_window;
+}
+
+void
+ev_window_show_recent_view (EvWindow *ev_window)
+{
+	GAction *action;
+	gboolean has_document;
+
+	has_document = ev_window->priv->document != NULL;
+
+	gtk_widget_hide (ev_window->priv->hpaned);
+	gtk_widget_hide (ev_window->priv->find_bar);
+
+	if (!ev_window->priv->recent_view) {
+		ev_window->priv->recent_view = EV_RECENT_VIEW (ev_recent_view_new ());
+		g_signal_connect_object (ev_window->priv->recent_view,
+		                         "item-activated",
+		                         G_CALLBACK (recent_view_item_activated_cb),
+		                         ev_window, 0);
+		gtk_box_pack_start (GTK_BOX (ev_window->priv->main_box),
+		                    GTK_WIDGET (ev_window->priv->recent_view),
+		                    TRUE, TRUE, 0);
+	}
+
+	ev_window_set_action_enabled (ev_window, "recent-view", has_document);
+	action = g_action_map_lookup_action (G_ACTION_MAP (ev_window), "recent-view");
+	g_simple_action_set_state (G_SIMPLE_ACTION (action), g_variant_new_boolean (has_document));
+	gtk_widget_show (GTK_WIDGET (ev_window->priv->recent_view));
 }
 
 const gchar *

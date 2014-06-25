@@ -92,6 +92,7 @@ GMenuModel     *ev_window_get_bookmarks_menu             (EvWindow       *ev_win
 EvHistory      *ev_window_get_history                    (EvWindow       *ev_window);
 EvDocumentModel *ev_window_get_document_model            (EvWindow       *ev_window);
 void            ev_window_focus_view                     (EvWindow       *ev_window);
+void            ev_window_show_recent_view               (EvWindow       *ev_window);
 
 G_END_DECLS
 
