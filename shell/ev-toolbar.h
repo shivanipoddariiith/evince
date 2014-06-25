@@ -26,6 +26,14 @@
 
 G_BEGIN_DECLS
 
+typedef enum {
+	EV_TOOLBAR_MODE_NORMAL,
+	EV_TOOLBAR_MODE_FULL_SCREEN,
+	EV_TOOLBAR_MODE_PRESENTATION,
+	EV_TOOLBAR_MODE_PREVIEW,
+	EV_TOOLBAR_MODE_RECENT_VIEW,
+} EvToolbarMode;
+
 #define EV_TYPE_TOOLBAR              (ev_toolbar_get_type())
 #define EV_TOOLBAR(object)           (G_TYPE_CHECK_INSTANCE_CAST((object), EV_TYPE_TOOLBAR, EvToolbar))
 #define EV_IS_TOOLBAR(object)        (G_TYPE_CHECK_INSTANCE_TYPE((object), EV_TYPE_TOOLBAR))
@@ -52,6 +60,8 @@ GtkWidget *ev_toolbar_new                (EvWindow *window);
 gboolean   ev_toolbar_has_visible_popups (EvToolbar *ev_toolbar);
 void       ev_toolbar_action_menu_popup  (EvToolbar *ev_toolbar);
 GtkWidget *ev_toolbar_get_page_selector  (EvToolbar *ev_toolbar);
+void       ev_toolbar_set_mode           (EvToolbar     *ev_toolbar,
+					  EvToolbarMode  mode);
 
 G_END_DECLS
 

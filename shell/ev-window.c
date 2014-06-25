@@ -490,6 +490,13 @@ ev_window_setup_action_sensitivity (EvWindow *ev_window)
 	action = g_action_map_lookup_action (G_ACTION_MAP (ev_window), "recent-view");
 	g_simple_action_set_state (G_SIMPLE_ACTION (action), g_variant_new_boolean (has_document));
 
+	if (has_document)
+		ev_toolbar_set_mode (EV_TOOLBAR (ev_window->priv->toolbar),
+			             EV_TOOLBAR_MODE_NORMAL);
+	else
+		ev_toolbar_set_mode (EV_TOOLBAR (ev_window->priv->toolbar),
+			             EV_TOOLBAR_MODE_RECENT_VIEW);
+
         ev_window_update_actions_sensitivity (ev_window);
 }
 
@@ -4568,15 +4575,16 @@ ev_window_cmd_toggle_recent_view (GSimpleAction *action,
                                   GVariant      *parameter,
                                   gpointer      user_data)
 {
-	EvWindow *ev_window = user_data;
+	EvWindow  *ev_window = user_data;
+	EvToolbar *toolbar = EV_TOOLBAR (ev_window->priv->toolbar);
 
-	if (!ev_window->priv->recent_view)
+	if (!ev_window->priv->recent_view) {
 		ev_window_show_recent_view (ev_window);
-	else {
+		ev_toolbar_set_mode (toolbar, EV_TOOLBAR_MODE_RECENT_VIEW);
+	} else {
 		ev_window_swap_out_recent_view_if_needed (ev_window);
-		ev_window_setup_action_sensitivity (ev_window);
+		ev_toolbar_set_mode (toolbar, EV_TOOLBAR_MODE_NORMAL);
 	}
-	return;
 }
 
 static gint
@@ -5066,8 +5074,11 @@ ev_window_swap_out_recent_view_if_needed (EvWindow *ev_window)
 	{
 		gtk_widget_hide (GTK_WIDGET (ev_window->priv->recent_view));
 		ev_window->priv->recent_view = NULL;
+		ev_toolbar_set_mode (EV_TOOLBAR (ev_window->priv->toolbar),
+				     EV_TOOLBAR_MODE_NORMAL);
 	}
 	gtk_widget_show (ev_window->priv->hpaned);
+	ev_window_update_actions_sensitivity (ev_window);
 }
 
 static void
