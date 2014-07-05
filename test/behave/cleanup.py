@@ -5,5 +5,5 @@ import os
 from gi.repository import Gio
 
 # Reset GSettings
-for schema in ['org.gnome.Evince', 'org.gnome.Evince.Application']:
+for schema in ['org.gnome.Evince']:
     os.system("gsettings reset-recursively %s" % schema)
