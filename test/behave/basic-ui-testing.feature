@@ -1,26 +1,22 @@
 Feature: Basic UI Actions
 
-  @test_file_open
+  @test_file_open_button
   Scenario: Start Evince via command
     * Open the New file Dialog
-    * Close the Dialog
-    Then No file should be open
 
-  @test_toolbar_editor
+  @test_document_viewer_settings
   Scenario: Start Evince via command
-    * Open the Toolbar editor dialog
-    * Close the Dialog
-#    Then 
+    * Open Document Viewer Settings
 
   @test_about_dialog_open
   Scenario: Start Evince via command
     * Open About Document Viewer
-    * Open Credits
-    Then Credits should show
+#    * Open Credits
+#    Then Credits should show
 
-  @test_about_dialog_close
-  Scenario: Open About Document Viewer
-    * Open Credits
-    * Close credits
-    * Close About document viewer
-    Then About should not show
+#  @test_about_dialog_close
+#  Scenario: Open About Document Viewer
+#    * Open Credits
+#    * Close credits
+#    * Close About document viewer
+#    Then About should not show
