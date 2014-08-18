@@ -71,8 +71,6 @@ evince_SOURCES=				\
 	ev-sidebar-page.h		\
 	ev-sidebar-thumbnails.c		\
 	ev-sidebar-thumbnails.h		\
-	ev-recent-menu-model.c		\
-	ev-recent-menu-model.h		\
 	main.c
 
 nodist_evince_SOURCES = \
@@ -174,11 +172,10 @@ EXTRA_DIST = \
 	evince-icon.rc \
 	evince.gresource.xml \
 	ev-gdbus.xml \
-	ev-daemon-gdbus.xml \
-	thumbnail-frame.png
+	ev-daemon-gdbus.xml
 
-ev-resources.c: evince.gresource.xml Makefile $(shell $(GLIB_COMPILE_RESOURCES) --generate-dependencies --sourcedir $(srcdir) $(srcdir)/evince.gresource.xml)
-	$(AM_V_GEN) XMLLINT=$(XMLLINT) $(GLIB_COMPILE_RESOURCES) --target $@ --sourcedir $(srcdir) --generate-source --c-name ev $<
+ev-resources.c: evince.gresource.xml Makefile $(shell $(GLIB_COMPILE_RESOURCES) --generate-dependencies --sourcedir=$(srcdir) --sourcedir=$(top_srcdir)/data $(srcdir)/evince.gresource.xml)
+	$(AM_V_GEN) XMLLINT=$(XMLLINT) $(GLIB_COMPILE_RESOURCES) --target $@ --sourcedir=$(srcdir) --sourcedir=$(top_srcdir)/data --generate-source --c-name ev $<
 
 ev-gdbus-generated.c ev-gdbus-generated.h: ev-gdbus.xml Makefile
 	$(AM_V_GEN) $(GDBUS_CODEGEN) \

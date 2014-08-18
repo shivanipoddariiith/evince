@@ -129,7 +129,10 @@ ev_display_open_if_needed (const gchar *name)
 	for (l = displays; l != NULL; l = l->next) {
 		const gchar *display_name = gdk_display_get_name ((GdkDisplay *) l->data);
 
-		if (g_ascii_strcasecmp (display_name, name) == 0) {
+                /* The given name might come with the screen number, because GdkAppLaunchContext
+                 * uses gdk_screen_make_display_name().
+                 */
+                if (g_str_has_prefix (name, display_name)) {
 			display = l->data;
 			break;
 		}
@@ -214,6 +217,7 @@ ev_spawn (const char     *uri,
 
 	if (app != NULL) {
                 GList uri_list;
+                GList *uris = NULL;
 		GdkAppLaunchContext *ctx;
 
 		ctx = gdk_display_get_app_launch_context (gdk_screen_get_display (screen));
@@ -226,10 +230,12 @@ ev_spawn (const char     *uri,
                  * consider using g_app_info_launch_uris() instead.
                  * See https://bugzilla.gnome.org/show_bug.cgi?id=644604
                  */
-                uri_list.data = (gchar *)uri;
-                uri_list.prev = uri_list.next = NULL;
-		g_app_info_launch_uris (app, &uri_list,
-                                        G_APP_LAUNCH_CONTEXT (ctx), &error);
+                if (uri) {
+                        uri_list.data = (gchar *)uri;
+                        uri_list.prev = uri_list.next = NULL;
+                        uris = &uri_list;
+                }
+		g_app_info_launch_uris (app, uris, G_APP_LAUNCH_CONTEXT (ctx), &error);
 
 		g_object_unref (app);
 		g_object_unref (ctx);
@@ -642,19 +648,31 @@ ev_application_open_uri_at_dest (EvApplication  *application,
 #endif /* ENABLE_DBUS */
 }
 
+static void
+ev_application_new_window (EvApplication *application,
+			   GdkScreen     *screen,
+			   guint32        timestamp)
+{
+        /* spawn an empty window */
+	ev_spawn (NULL, screen, NULL, EV_WINDOW_MODE_NORMAL, NULL, timestamp);
+}
+
 /**
- * ev_application_open_window:
+ * ev_application_open_recent_view:
  * @application: The instance of the application.
  * @timestamp: Current time value.
  *
- * Creates a new window
+ * Creates a new window showing the recent view
  */
 void
-ev_application_open_window (EvApplication *application,
-			    GdkScreen     *screen,
-			    guint32        timestamp)
+ev_application_open_recent_view (EvApplication *application,
+                                 GdkScreen     *screen,
+                                 guint32        timestamp)
 {
 	GtkWidget *new_window = ev_window_new ();
+
+	ev_window_open_recent_view (EV_WINDOW (new_window));
+
 #ifdef GDK_WINDOWING_X11
 	GdkWindow *gdk_window;
 #endif
@@ -928,6 +946,28 @@ ev_application_migrate_config_dir (EvApplication *application)
 }
 
 static void
+app_new_cb (GSimpleAction *action,
+            GVariant      *parameter,
+            gpointer       user_data)
+{
+	EvApplication *application = user_data;
+        GList         *windows, *l;
+        GtkWindow     *window = NULL;
+
+        windows = gtk_application_get_windows (GTK_APPLICATION (application));
+        for (l = windows; l != NULL; l = l->next) {
+                if (EV_IS_WINDOW (l->data)) {
+                        window = GTK_WINDOW (l->data);
+                        break;
+                }
+        }
+
+	ev_application_new_window (application,
+                                   window ? gtk_window_get_screen (window) : gdk_screen_get_default (),
+                                   gtk_get_current_event_time ());
+}
+
+static void
 app_help_cb (GSimpleAction *action,
              GVariant      *parameter,
              gpointer       user_data)
@@ -1009,6 +1049,7 @@ static void
 ev_application_startup (GApplication *gapplication)
 {
         const GActionEntry app_menu_actions[] = {
+		{ "new",  app_new_cb, NULL, NULL, NULL },
                 { "help", app_help_cb, NULL, NULL, NULL },
                 { "about", app_about_cb, NULL, NULL, NULL }
         };
@@ -1021,8 +1062,6 @@ ev_application_startup (GApplication *gapplication)
           "win.copy",                   "<Ctrl>C", "<Ctrl>Insert", NULL,
           "win.select-all",             "<Ctrl>A", NULL,
           "win.save-settings",          "<Ctrl>T", NULL,
-          "win.go-first-page",          "<Ctrl>Home", NULL,
-          "win.go-last-page",           "<Ctrl>End", NULL,
           "win.add-bookmark",           "<Ctrl>D", NULL,
           "win.close",                  "<Ctrl>W", NULL,
           "win.escape",                 "Escape", NULL,

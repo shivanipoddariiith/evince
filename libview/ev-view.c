@@ -53,6 +53,7 @@ enum {
 	SIGNAL_SELECTION_CHANGED,
 	SIGNAL_SYNC_SOURCE,
 	SIGNAL_ANNOT_ADDED,
+	SIGNAL_ANNOT_REMOVED,
 	SIGNAL_LAYERS_CHANGED,
 	SIGNAL_MOVE_CURSOR,
 	SIGNAL_CURSOR_MOVED,
@@ -205,7 +206,6 @@ static void       ev_view_page_changed_cb                    (EvDocumentModel   
 							      EvView             *view);
 static void       on_adjustment_value_changed                (GtkAdjustment      *adjustment,
 							      EvView             *view);
-
 /*** GObject ***/
 static void       ev_view_finalize                           (GObject            *object);
 static void       ev_view_dispose                            (GObject            *object);
@@ -926,6 +926,27 @@ compute_scroll_increment (EvView        *view,
 
 }
 
+static void
+ev_view_first_page (EvView *view)
+{
+	ev_document_model_set_page (view->model, 0);
+}
+
+static void
+ev_view_last_page (EvView *view)
+{
+	gint n_pages;
+
+	if (!view->document)
+		return;
+
+	n_pages = ev_document_get_n_pages (view->document);
+	if (n_pages <= 1)
+		return;
+
+	ev_document_model_set_page (view->model, n_pages - 1);
+}
+
 /**
  * ev_view_scroll:
  * @view: a #EvView
@@ -1022,6 +1043,18 @@ ev_view_scroll (EvView        *view,
 			break;
         	case GTK_SCROLL_STEP_UP:
 			value += step_increment / 10;
+			break;
+	        case GTK_SCROLL_START:
+			value = lower;
+			if (!first_page)
+				ev_view_first_page (view);
+			break;
+	        case GTK_SCROLL_END:
+			value = upper - page_size;
+			if (!last_page)
+				ev_view_last_page (view);
+			/* Changing pages causes the top to be shown. Here we want the bottom shown. */
+			view->pending_point.y = value;
 			break;
         	default:
 			break;
@@ -2124,6 +2157,9 @@ _ev_view_set_focused_element (EvView *view,
 	if (view->focused_element == element_mapping)
 		return;
 
+	if (view->accessible)
+		ev_view_accessible_set_focused_element (EV_VIEW_ACCESSIBLE (view->accessible), element_mapping, page);
+
 	if (ev_view_get_focused_area (view, &view_rect))
 		region = cairo_region_create_rectangle (&view_rect);
 
@@ -2269,6 +2305,11 @@ ev_view_form_field_button_toggle (EvView      *view,
 						       !state);
 	field_button->state = !state;
 
+	if (view->accessible)
+		ev_view_accessible_update_element_state (EV_VIEW_ACCESSIBLE (view->accessible),
+							 ev_mapping_list_find (forms_mapping, field),
+							 field->page->index);
+
 	ev_view_reload_page (view, field->page->index, region);
 	cairo_region_destroy (region);
 }
@@ -2279,6 +2320,10 @@ ev_view_form_field_button_create_widget (EvView      *view,
 {
 	EvMappingList *form_mapping;
 	EvMapping     *mapping;
+
+	/* We need to do this focus grab prior to setting the focused element for accessibility */
+	if (!gtk_widget_has_focus (GTK_WIDGET (view)))
+		gtk_widget_grab_focus (GTK_WIDGET (view));
 
 	form_mapping = ev_page_cache_get_form_field_mapping (view->page_cache,
 							     field->page->index);
@@ -3150,7 +3195,7 @@ ev_view_create_annotation (EvView          *view,
 
 	/* If the page didn't have annots, mark the cache as dirty */
 	if (!ev_page_cache_get_annot_mapping (view->page_cache, view->current_page))
-		ev_page_cache_mark_dirty (view->page_cache, view->current_page);
+		ev_page_cache_mark_dirty (view->page_cache, view->current_page, EV_PAGE_DATA_INCLUDE_ANNOTS);
 
 	if (EV_IS_ANNOTATION_MARKUP (annot)) {
 		GtkWindow *parent;
@@ -3211,6 +3256,45 @@ ev_view_cancel_add_annotation (EvView *view)
 	view->adding_annot = FALSE;
 	ev_document_misc_get_pointer_position (GTK_WIDGET (view), &x, &y);
 	ev_view_handle_cursor_over_xy (view, x, y);
+}
+
+void
+ev_view_remove_annotation (EvView       *view,
+                           EvAnnotation *annot)
+{
+        guint page;
+
+        g_return_if_fail (EV_IS_VIEW (view));
+        g_return_if_fail (EV_IS_ANNOTATION (annot));
+
+	g_object_ref (annot);
+
+        page = ev_annotation_get_page_index (annot);
+
+        if (EV_IS_ANNOTATION_MARKUP (annot)) {
+		EvViewWindowChild *child;
+
+		child = ev_view_find_window_child_for_annot (view, page, annot);
+		if (child) {
+			view->window_children = g_list_remove (view->window_children, child);
+			gtk_widget_destroy (child->window);
+			g_free (child);
+		}
+        }
+        _ev_view_set_focused_element (view, NULL, -1);
+
+        ev_document_doc_mutex_lock ();
+        ev_document_annotations_remove_annotation (EV_DOCUMENT_ANNOTATIONS (view->document),
+                                                   annot);
+        ev_document_doc_mutex_unlock ();
+
+        ev_page_cache_mark_dirty (view->page_cache, page, EV_PAGE_DATA_INCLUDE_ANNOTS);
+
+	/* FIXME: only redraw the annot area */
+        ev_view_reload_page (view, page, NULL);
+
+	g_signal_emit (view, signals[SIGNAL_ANNOT_REMOVED], 0, annot);
+	g_object_unref (annot);
 }
 
 static gboolean
@@ -3459,6 +3543,29 @@ ev_view_pend_cursor_blink (EvView *view)
 								 (GSourceFunc)blink_cb, view);
 }
 
+static void
+preload_pages_for_caret_navigation (EvView *view)
+{
+	gint n_pages;
+
+	if (!view->document)
+		return;
+
+	/* Upload to the cache the first and last pages,
+	 * this information is needed to position the cursor
+	 * in the beginning/end of the document, for example
+	 * when pressing <Ctr>Home/End
+	 */
+	n_pages = ev_document_get_n_pages (view->document);
+
+	/* For documents with at least 3 pages, those are already cached anyway */
+	if (n_pages > 0 && n_pages <= 3)
+		return;
+
+	ev_page_cache_ensure_page (view->page_cache, 0);
+	ev_page_cache_ensure_page (view->page_cache, n_pages - 1);
+}
+
 /**
  * ev_view_supports_caret_navigation:
  * @view: a #EvView
@@ -3499,6 +3606,9 @@ ev_view_set_caret_navigation_enabled (EvView   *view,
 
 	if (view->caret_enabled != enabled) {
 		view->caret_enabled = enabled;
+		if (view->caret_enabled)
+			preload_pages_for_caret_navigation (view);
+
 		ev_view_check_cursor_blink (view);
 
 		if (cursor_is_in_visible_page (view))
@@ -4637,7 +4747,10 @@ ev_view_button_press_event (GtkWidget      *widget,
 
 	if (!view->document)
 		return FALSE;
-	
+
+	if (gtk_gesture_is_recognized (view->zoom_gesture))
+		return TRUE;
+
 	if (!gtk_widget_has_focus (widget)) {
 		gtk_widget_grab_focus (widget);
 	}
@@ -4958,6 +5071,9 @@ ev_view_motion_notify_event (GtkWidget      *widget,
 	if (!view->document)
 		return FALSE;
 
+	if (gtk_gesture_is_recognized (view->zoom_gesture))
+		return TRUE;
+
 	window = gtk_widget_get_window (widget);
 
         if (event->is_hint || event->window != window) {
@@ -5113,6 +5229,9 @@ ev_view_button_release_event (GtkWidget      *widget,
 	EvLink *link = NULL;
 
 	view->image_dnd_info.in_drag = FALSE;
+
+	if (gtk_gesture_is_recognized (view->zoom_gesture))
+		return TRUE;
 
 	if (view->scroll_info.autoscrolling) {
 		ev_view_autoscroll_stop (view);
@@ -5324,6 +5443,23 @@ cursor_go_to_previous_page (EvView *view)
 		return cursor_go_to_page_end (view);
 	}
 	return FALSE;
+}
+
+static gboolean
+cursor_go_to_document_start (EvView *view)
+{
+	view->cursor_page = 0;
+	return cursor_go_to_page_start (view);
+}
+
+static gboolean
+cursor_go_to_document_end (EvView *view)
+{
+	if (!view->document)
+		return FALSE;
+
+	view->cursor_page = ev_document_get_n_pages (view->document) - 1;
+	return cursor_go_to_page_end (view);
 }
 
 static gboolean
@@ -5631,6 +5767,12 @@ ev_view_move_cursor (EvView         *view,
 			cursor_go_to_line_end (view);
 		else if (count < 0)
 			cursor_go_to_line_start (view);
+		break;
+	case GTK_MOVEMENT_BUFFER_ENDS:
+		if (count > 0)
+			cursor_go_to_document_end (view);
+		else if (count < 0)
+			cursor_go_to_document_start (view);
 		break;
 	default:
 		g_assert_not_reached ();
@@ -6008,10 +6150,14 @@ draw_surface (cairo_t 	      *cr,
 	      gint             target_width,
 	      gint             target_height)
 {
-	gint width, height;
+	gdouble width, height;
+	gdouble device_scale_x = 1, device_scale_y = 1;
 
-	width = cairo_image_surface_get_width (surface);
-	height = cairo_image_surface_get_height (surface);
+#ifdef HAVE_HIDPI_SUPPORT
+	cairo_surface_get_device_scale (surface, &device_scale_x, &device_scale_y);
+#endif
+	width = cairo_image_surface_get_width (surface) / device_scale_x;
+	height = cairo_image_surface_get_height (surface) / device_scale_y;
 
 	cairo_save (cr);
 	cairo_translate (cr, x, y);
@@ -6030,8 +6176,8 @@ draw_surface (cairo_t 	      *cr,
 	}
 
 	cairo_surface_set_device_offset (surface,
-					 offset_x,
-					 offset_y);
+					 offset_x * device_scale_x,
+					 offset_y * device_scale_y);
 	cairo_set_source_surface (cr, surface, 0, 0);
 	cairo_paint (cr);
 	cairo_restore (cr);
@@ -6165,9 +6311,18 @@ draw_one_page (EvView       *view,
 		if (region) {
 			double scale_x, scale_y;
 			GdkRGBA color;
+			double device_scale_x = 1, device_scale_y = 1;
 
 			scale_x = (gdouble)width / cairo_image_surface_get_width (page_surface);
 			scale_y = (gdouble)height / cairo_image_surface_get_height (page_surface);
+
+#ifdef HAVE_HIDPI_SUPPORT
+			cairo_surface_get_device_scale (page_surface, &device_scale_x, &device_scale_y);
+#endif
+
+			scale_x *= device_scale_x;
+			scale_y *= device_scale_y;
+
 			_ev_view_get_selection_colors (view, &color, NULL);
 			draw_selection_region (cr, region, &color, real_page_area.x, real_page_area.y,
 					       scale_x, scale_y);
@@ -6196,6 +6351,8 @@ ev_view_finalize (GObject *object)
 	if (view->image_dnd_info.image)
 		g_object_unref (view->image_dnd_info.image);
 	view->image_dnd_info.image = NULL;
+
+	g_object_unref (view->zoom_gesture);
 
 	G_OBJECT_CLASS (ev_view_parent_class)->finalize (object);
 }
@@ -6443,6 +6600,77 @@ ev_view_screen_changed (GtkWidget *widget,
 }
 
 static void
+pan_gesture_pan_cb (GtkGesturePan   *gesture,
+		    GtkPanDirection  direction,
+		    gdouble          offset,
+		    EvView          *view)
+{
+	GtkAllocation allocation;
+
+	gtk_widget_get_allocation (GTK_WIDGET (view), &allocation);
+
+	if (view->continuous ||
+	    allocation.width < view->requisition.width) {
+		gtk_gesture_set_state (GTK_GESTURE (gesture),
+				       GTK_EVENT_SEQUENCE_DENIED);
+		return;
+	}
+
+#define PAN_ACTION_DISTANCE 200
+
+	view->pan_action = EV_PAN_ACTION_NONE;
+	gtk_gesture_set_state (GTK_GESTURE (gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+
+	if (offset > PAN_ACTION_DISTANCE) {
+		if (direction == GTK_PAN_DIRECTION_LEFT ||
+		    gtk_widget_get_direction (GTK_WIDGET (view)) == GTK_TEXT_DIR_RTL)
+			view->pan_action = EV_PAN_ACTION_NEXT;
+		else
+			view->pan_action = EV_PAN_ACTION_PREV;
+	}
+#undef PAN_ACTION_DISTANCE
+}
+
+static void
+pan_gesture_end_cb (GtkGesture       *gesture,
+		    GdkEventSequence *sequence,
+		    EvView           *view)
+{
+	if (!gtk_gesture_handles_sequence (gesture, sequence))
+		return;
+
+	if (view->pan_action == EV_PAN_ACTION_PREV)
+		ev_view_previous_page (view);
+	else if (view->pan_action == EV_PAN_ACTION_NEXT)
+		ev_view_next_page (view);
+
+	view->pan_action = EV_PAN_ACTION_NONE;
+}
+
+static void
+ev_view_hierarchy_changed (GtkWidget *widget,
+			   GtkWidget *previous_toplevel)
+{
+	GtkWidget *parent = gtk_widget_get_parent (widget);
+	EvView *view = EV_VIEW (widget);
+
+	if (parent && !view->pan_gesture) {
+		view->pan_gesture =
+			gtk_gesture_pan_new (parent, GTK_ORIENTATION_HORIZONTAL);
+		g_signal_connect (view->pan_gesture, "pan",
+				  G_CALLBACK (pan_gesture_pan_cb), widget);
+		g_signal_connect (view->pan_gesture, "end",
+				  G_CALLBACK (pan_gesture_end_cb), widget);
+
+		gtk_gesture_single_set_touch_only (GTK_GESTURE_SINGLE (view->pan_gesture), TRUE);
+		gtk_event_controller_set_propagation_phase (GTK_EVENT_CONTROLLER (view->pan_gesture),
+							    GTK_PHASE_CAPTURE);
+	} else if (!parent && view->pan_gesture) {
+		g_clear_object (&view->pan_gesture);
+	}
+}
+
+static void
 add_move_binding_keypad (GtkBindingSet  *binding_set,
 			 guint           keyval,
 			 GdkModifierType modifiers,
@@ -6622,6 +6850,16 @@ ev_view_focus (GtkWidget        *widget,
 }
 
 static void
+ev_view_parent_set (GtkWidget *widget,
+		    GtkWidget *previous_parent)
+{
+	GtkWidget *parent;
+
+	parent = gtk_widget_get_parent (widget);
+	g_assert (!parent || GTK_IS_SCROLLED_WINDOW (parent));
+}
+
+static void
 ev_view_class_init (EvViewClass *class)
 {
 	GObjectClass *object_class = G_OBJECT_CLASS (class);
@@ -6656,6 +6894,8 @@ ev_view_class_init (EvViewClass *class)
 	widget_class->query_tooltip = ev_view_query_tooltip;
 	widget_class->screen_changed = ev_view_screen_changed;
 	widget_class->focus = ev_view_focus;
+	widget_class->parent_set = ev_view_parent_set;
+	widget_class->hierarchy_changed = ev_view_hierarchy_changed;
 
 	container_class->remove = ev_view_remove;
 	container_class->forall = ev_view_forall;
@@ -6762,6 +7002,14 @@ ev_view_class_init (EvViewClass *class)
 		         g_cclosure_marshal_VOID__OBJECT,
 		         G_TYPE_NONE, 1,
 			 EV_TYPE_ANNOTATION);
+	signals[SIGNAL_ANNOT_REMOVED] = g_signal_new ("annot-removed",
+	  	         G_TYPE_FROM_CLASS (object_class),
+		         G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION,
+		         G_STRUCT_OFFSET (EvViewClass, annot_removed),
+		         NULL, NULL,
+		         g_cclosure_marshal_VOID__OBJECT,
+		         G_TYPE_NONE, 1,
+ 		         EV_TYPE_ANNOTATION);
 	signals[SIGNAL_LAYERS_CHANGED] = g_signal_new ("layers-changed",
 	  	         G_TYPE_FROM_CLASS (object_class),
 		         G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION,
@@ -6809,6 +7057,8 @@ ev_view_class_init (EvViewClass *class)
 	add_move_binding_keypad (binding_set, GDK_KEY_Down,  0, GTK_MOVEMENT_DISPLAY_LINES, 1);
 	add_move_binding_keypad (binding_set, GDK_KEY_Home,  0, GTK_MOVEMENT_DISPLAY_LINE_ENDS, -1);
 	add_move_binding_keypad (binding_set, GDK_KEY_End,   0, GTK_MOVEMENT_DISPLAY_LINE_ENDS, 1);
+	add_move_binding_keypad (binding_set, GDK_KEY_Home,  GDK_CONTROL_MASK, GTK_MOVEMENT_BUFFER_ENDS, -1);
+	add_move_binding_keypad (binding_set, GDK_KEY_End,   GDK_CONTROL_MASK, GTK_MOVEMENT_BUFFER_ENDS, 1);
 
         add_scroll_binding_keypad (binding_set, GDK_KEY_Left,  0, GTK_SCROLL_STEP_BACKWARD, GTK_ORIENTATION_HORIZONTAL);
         add_scroll_binding_keypad (binding_set, GDK_KEY_Right, 0, GTK_SCROLL_STEP_FORWARD, GTK_ORIENTATION_HORIZONTAL);
@@ -6820,6 +7070,8 @@ ev_view_class_init (EvViewClass *class)
         add_scroll_binding_keypad (binding_set, GDK_KEY_Down,  GDK_MOD1_MASK, GTK_SCROLL_STEP_UP, GTK_ORIENTATION_VERTICAL);
 	add_scroll_binding_keypad (binding_set, GDK_KEY_Page_Up, 0, GTK_SCROLL_PAGE_BACKWARD, GTK_ORIENTATION_VERTICAL);
 	add_scroll_binding_keypad (binding_set, GDK_KEY_Page_Down, 0, GTK_SCROLL_PAGE_FORWARD, GTK_ORIENTATION_VERTICAL);
+	add_scroll_binding_keypad (binding_set, GDK_KEY_Home, GDK_CONTROL_MASK, GTK_SCROLL_START, GTK_ORIENTATION_VERTICAL);
+	add_scroll_binding_keypad (binding_set, GDK_KEY_End, GDK_CONTROL_MASK, GTK_SCROLL_END, GTK_ORIENTATION_VERTICAL);
 
 	/* We can't use the bindings defined in GtkWindow for Space and Return,
 	 * because we also have those bindings for scrolling.
@@ -6868,6 +7120,41 @@ ev_view_class_init (EvViewClass *class)
 }
 
 static void
+on_notify_scale_factor (EvView     *view,
+			GParamSpec *pspec)
+{
+	if (view->document)
+		view_update_range_and_current_page (view);
+}
+
+static void
+zoom_gesture_begin_cb (GtkGesture       *gesture,
+		       GdkEventSequence *sequence,
+		       EvView           *view)
+{
+	view->prev_zoom_gesture_scale = 1;
+}
+
+static void
+zoom_gesture_scale_changed_cb (GtkGestureZoom *gesture,
+			       gdouble         scale,
+			       EvView         *view)
+{
+	gdouble factor;
+
+	view->drag_info.in_drag = FALSE;
+	view->image_dnd_info.in_drag = FALSE;
+
+	factor = scale - view->prev_zoom_gesture_scale + 1;
+	view->prev_zoom_gesture_scale = scale;
+	ev_document_model_set_sizing_mode (view->model, EV_SIZING_FREE);
+
+	if ((factor < 1.0 && ev_view_can_zoom_out (view)) ||
+	    (factor >= 1.0 && ev_view_can_zoom_in (view)))
+		ev_view_zoom (view, factor);
+}
+
+static void
 ev_view_init (EvView *view)
 {
 	GtkStyleContext *context;
@@ -6882,6 +7169,7 @@ ev_view_init (EvView *view)
 	gtk_style_context_add_class (context, "view");
 
 	gtk_widget_set_events (GTK_WIDGET (view),
+			       GDK_TOUCH_MASK |
 			       GDK_EXPOSURE_MASK |
 			       GDK_BUTTON_PRESS_MASK |
 			       GDK_BUTTON_RELEASE_MASK |
@@ -6916,6 +7204,18 @@ ev_view_init (EvView *view)
 	view->pixbuf_cache_size = DEFAULT_PIXBUF_CACHE_SIZE;
 	view->caret_enabled = FALSE;
 	view->cursor_page = 0;
+
+	g_signal_connect (view, "notify::scale-factor",
+			  G_CALLBACK (on_notify_scale_factor), NULL);
+
+	view->zoom_gesture = gtk_gesture_zoom_new (GTK_WIDGET (view));
+	gtk_event_controller_set_propagation_phase (GTK_EVENT_CONTROLLER (view->zoom_gesture),
+						    GTK_PHASE_CAPTURE);
+
+	g_signal_connect (view->zoom_gesture, "begin",
+			  G_CALLBACK (zoom_gesture_begin_cb), view);
+	g_signal_connect (view->zoom_gesture, "scale-changed",
+			  G_CALLBACK (zoom_gesture_scale_changed_cb), view);
 }
 
 /*** Callbacks ***/
@@ -7190,7 +7490,10 @@ ev_view_document_changed_cb (EvDocumentModel *model,
 
 			ev_view_set_loading (view, FALSE);
 			setup_caches (view);
-                }
+
+			if (view->caret_enabled)
+				preload_pages_for_caret_navigation (view);
+		}
 
 		current_page = ev_document_model_get_page (model);
 		if (view->current_page != current_page) {
@@ -7199,7 +7502,6 @@ ev_view_document_changed_cb (EvDocumentModel *model,
 			view->pending_scroll = SCROLL_TO_KEEP_POSITION;
 			gtk_widget_queue_resize (GTK_WIDGET (view));
 		}
-
 		view_update_scale_limits (view);
 	}
 }

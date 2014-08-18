@@ -4,9 +4,9 @@
 
 m4_define([ev_major_version],[3])
 m4_define([ev_minor_version],[13])
-m4_define([ev_micro_version],[3])
-m4_define([ev_extra_version],[1])
-m4_define([ev_version],[ev_major_version.ev_minor_version.ev_micro_version.ev_extra_version])
+m4_define([ev_micro_version],[90])
+m4_define([ev_extra_version],[])
+m4_define([ev_version],[ev_major_version.ev_minor_version.ev_micro_version()ev_extra_version])
 
 # The evince API version
 m4_define([ev_api_version], [3.0])
@@ -118,7 +118,7 @@ dnl Specify required versions of dependencies
 CAIRO_REQUIRED=1.10.0
 GLIB_REQUIRED=2.36.0
 LIBSECRET_REQUIRED=0.5
-GTK_REQUIRED=3.10.0
+GTK_REQUIRED=3.12.0
 NAUTILUS_REQUIRED=2.91.4
 
 AC_SUBST([GLIB_REQUIRED])
@@ -153,7 +153,7 @@ ZLIB_LIBS=-lz
 AC_SUBST(ZLIB_LIBS)
 
 PKG_CHECK_MODULES(LIBDOCUMENT, gtk+-3.0 >= $GTK_REQUIRED gio-2.0 >= $GLIB_REQUIRED gmodule-no-export-2.0 >= $GLIB_REQUIRED gmodule-2.0)
-PKG_CHECK_MODULES(LIBVIEW, gtk+-3.0 >= $GTK_REQUIRED gail-3.0 >= $GTK_REQUIRED gthread-2.0 gio-2.0 >= $GLIB_REQUIRED)
+PKG_CHECK_MODULES(LIBVIEW, gtk+-3.0 >= $GTK_REQUIRED gthread-2.0 gio-2.0 >= $GLIB_REQUIRED)
 PKG_CHECK_MODULES(BACKEND, cairo >= $CAIRO_REQUIRED gtk+-3.0 >= $GTK_REQUIRED)
 PKG_CHECK_MODULES(FRONTEND_CORE, gtk+-3.0 >= $GTK_REQUIRED gthread-2.0 gio-2.0 >= $GLIB_REQUIRED gmodule-no-export-2.0 >= $GLIB_REQUIRED)
 
@@ -299,6 +299,31 @@ fi
 
 AM_CONDITIONAL([ENABLE_DBUS], [test "$enable_dbus" = "yes"])
 
+# *******************************
+# GNOME Desktop (Thumbnail cache)
+# *******************************
+
+AC_ARG_ENABLE([libgnome-desktop],
+        [AS_HELP_STRING([--disable-libgnome-desktop], [Disable GNOME Desktop (Thumbnail cache)])],
+        [enable_gnome_desktop=$enableval],
+        [enable_gnome_desktop=auto])
+
+if test "$enable_gnome_desktop" != "no"; then
+   if test "$enable_gnome_desktop" = "auto"; then
+      PKG_CHECK_MODULES([LIBGNOME_DESKTOP], [gnome-desktop-3.0], has_libgnome_desktop=yes, has_libgnome_desktop=no)
+   else
+      PKG_CHECK_MODULES([LIBGNOME_DESKTOP], [gnome-desktop-3.0])
+      has_libgnome_desktop = yes
+   fi
+
+   if test x$has_libgnome_desktop = xyes; then
+      AC_DEFINE([HAVE_LIBGNOME_DESKTOP], [1], [Whether GNOME Desktop (Thumbnail cache) is available])
+      enable_gnome_desktop=yes
+   else
+      enable_gnome_desktop=no
+   fi
+fi
+
 dnl ========= Check for Desktop Schemas
 PKG_CHECK_MODULES([DESKTOP_SCHEMAS], [gsettings-desktop-schemas],
                   has_desktop_schemas=yes, has_desktop_schemas=no)
@@ -318,13 +343,6 @@ if test "x$enable_debug" = "xyes"; then
    DEBUG_FLAGS="-DEV_ENABLE_DEBUG"
 fi
 
-AC_ARG_ENABLE([tests],
-	AS_HELP_STRING([--enable-tests], [Enable the tests]),
-	[enable_tests=$enableval],
-	[enable_tests=yes])
-
-AM_CONDITIONAL(ENABLE_TESTS, test x$enable_tests = xyes)
-
 LIBDOCUMENT_CFLAGS="$LIBDOCUMENT_CFLAGS $DEBUG_FLAGS"
 LIBDOCUMENT_LIBS="$LIBDOCUMENT_LIBS"
 AC_SUBST(LIBDOCUMENT_CFLAGS)
@@ -340,8 +358,8 @@ BACKEND_LIBS="$BACKEND_LIBS -lm"
 AC_SUBST(BACKEND_CFLAGS)
 AC_SUBST(BACKEND_LIBS)
 
-SHELL_CFLAGS="$SHELL_CORE_CFLAGS $LIBSECRET_CFLAGS -DGDK_MULTIHEAD_SAFE -DGTK_MULTIHEAD_SAFE $DEBUG_FLAGS"
-SHELL_LIBS="$SHELL_CORE_LIBS $LIBSECRET_LIBS -lz -lm"
+SHELL_CFLAGS="$SHELL_CORE_CFLAGS $LIBSECRET_CFLAGS -DGDK_MULTIHEAD_SAFE -DGTK_MULTIHEAD_SAFE $DEBUG_FLAGS $LIBGNOME_DESKTOP_CFLAGS"
+SHELL_LIBS="$SHELL_CORE_LIBS $LIBSECRET_LIBS $LIBGNOME_DESKTOP_LIBS -lz -lm"
 AC_SUBST(SHELL_CFLAGS)
 AC_SUBST(SHELL_LIBS)
 
@@ -422,6 +440,29 @@ PREVIEWER_CFLAGS="$PREVIEWER_CFLAGS $GTKUNIXPRINT_CFLAGS $DEBUG_FLAGS"
 PREVIEWER_LIBS="$PREVIEWER_LIBS $GTKUNIXPRINT_LIBS -lz"
 AC_SUBST(PREVIEWER_CFLAGS)
 AC_SUBST(PREVIEWER_LIBS)
+
+
+# **************
+# Browser Plugin
+# **************
+
+AC_ARG_ENABLE([browser-plugin],
+  [AS_HELP_STRING([--disable-browser-plugin],
+                  [Disable the Browser Plugin])],
+  [],
+  [enable_browser_plugin=yes])
+
+if test x$enable_browser_plugin = "xyes" ; then
+  PKG_CHECK_MODULES([BROWSER_PLUGIN],[gtk+-3.0 >= $GTK_REQUIRED gthread-2.0 gio-2.0 >= $GLIB_REQUIRED])
+
+  BROWSER_PLUGIN_DIR="${BROWSER_PLUGIN_DIR:-"\${libdir}/mozilla/plugins"}"
+  AC_ARG_VAR([BROWSER_PLUGIN_DIR],[Where to install the plugin to])
+fi
+
+AM_CONDITIONAL([ENABLE_BROWSER_PLUGIN],[test "$enable_browser_plugin" = "yes"])
+BROWSER_PLUGIN_CFLAGS="$BROWSER_PLUGIN_CFLAGS $DEBUG_FLAGS"
+AC_SUBST(BROWSER_PLUGIN_CFLAGS)
+AC_SUBST(BROWSER_PLUGIN_LIBS)
 
 # ***
 # GIR
@@ -809,6 +850,7 @@ backend/tiff/Makefile
 backend/xps/evince-xpsdocument.metainfo.xml.in
 backend/xps/xpsdocument.evince-backend.in
 backend/xps/Makefile
+browser-plugin/Makefile
 cut-n-paste/Makefile
 cut-n-paste/gimpcellrenderertoggle/Makefile
 cut-n-paste/synctex/Makefile
@@ -857,7 +899,6 @@ po/Makefile.in
 previewer/Makefile
 properties/Makefile
 shell/Makefile
-test/Makefile
 thumbnailer/Makefile
 ])
 
@@ -873,7 +914,6 @@ Evince configure summary
 
 Platform .................:  $with_platform
 Debug mode ...............:  $enable_debug
-Tests ....................:  $enable_tests
 
 
 FRONTENDS
@@ -882,6 +922,7 @@ Viewer ...................:  $enable_viewer
 Previewer ................:  $enable_previewer
 Thumbnailer ..............:  $enable_thumbnailer
 Nautilus Extensions.......:  $enable_nautilus
+Browser Plugin............:  $enable_browser_plugin
 
 
 BACKENDS
@@ -902,5 +943,6 @@ GObject Introspection ....:  $enable_introspection
 DBUS communication .......:  $enable_dbus
 Keyring integration ......:  $with_keyring
 GTK+ Unix Print ..........:  $with_gtk_unix_print
+Thumbnail cache ..........:  $enable_gnome_desktop
 
 ])

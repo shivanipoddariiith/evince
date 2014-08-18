@@ -63,6 +63,7 @@ struct _EvViewAccessiblePrivate {
 	gint previous_cursor_page;
 	gint start_page;
 	gint end_page;
+	AtkObject *focused_element;
 
 	GPtrArray *children;
 };
@@ -592,4 +593,36 @@ ev_view_accessible_set_page_range (EvViewAccessible *accessible,
 
 	accessible->priv->start_page = start;
 	accessible->priv->end_page = end;
+}
+
+void
+ev_view_accessible_set_focused_element (EvViewAccessible *accessible,
+					EvMapping        *new_focus,
+					gint              new_focus_page)
+{
+	EvPageAccessible *page;
+
+	if (accessible->priv->focused_element) {
+		atk_object_notify_state_change (accessible->priv->focused_element, ATK_STATE_FOCUSED, FALSE);
+		accessible->priv->focused_element = NULL;
+	}
+
+	if (!new_focus || new_focus_page == -1)
+		return;
+
+	page = g_ptr_array_index (accessible->priv->children, new_focus_page);
+	accessible->priv->focused_element = ev_page_accessible_get_accessible_for_mapping (page, new_focus);
+	if (accessible->priv->focused_element)
+		atk_object_notify_state_change (accessible->priv->focused_element, ATK_STATE_FOCUSED, TRUE);
+}
+
+void
+ev_view_accessible_update_element_state (EvViewAccessible *accessible,
+					 EvMapping        *element,
+					 gint              element_page)
+{
+	EvPageAccessible *page;
+
+	page = g_ptr_array_index (accessible->priv->children, element_page);
+	ev_page_accessible_update_element_state (page, element);
 }

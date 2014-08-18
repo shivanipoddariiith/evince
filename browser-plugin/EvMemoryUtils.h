@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Canonical Ltd
+ * Copyright (C) 2014 Igalia S.L.
  *
  * Evince is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by
@@ -14,17 +14,20 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
- *
- * Author: Lars Uebernickel <lars.uebernickel@canonical.com>
  */
 
-#ifndef EV_RECENT_MENU_MODEL_H
-#define EV_RECENT_MENU_MODEL_H
+#ifndef EvMemoryUtils_h
+#define EvMemoryUtils_h
 
-#include <gtk/gtk.h>
+#include <glib.h>
+#include <memory>
 
-GMenuModel *ev_recent_menu_model_new (GtkRecentManager *manager,
-                                      const gchar      *action_name,
-                                      const gchar      *application);
+template<typename T>
+struct unique_gptr_deleter {
+        void operator()(T* ptr) const { g_free(ptr); }
+};
 
-#endif
+template<typename T>
+using unique_gptr = std::unique_ptr<T, unique_gptr_deleter<T>>;
+
+#endif // EvMemoryUtils_h

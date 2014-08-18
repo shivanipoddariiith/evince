@@ -3002,6 +3002,16 @@ ev_annot_from_poppler_annot (PopplerAnnot *poppler_annot,
 	return ev_annot;
 }
 
+static void
+annot_set_unique_name (EvAnnotation *annot)
+{
+	gchar *name;
+
+	name = g_strdup_printf ("annot-%"G_GUINT64_FORMAT, g_get_real_time ());
+	ev_annotation_set_name (annot, name);
+	g_free (name);
+}
+
 static EvMappingList *
 pdf_document_annotations_get_annotations (EvDocumentAnnotations *document_annotations,
 					  EvPage                *page)
@@ -3042,12 +3052,8 @@ pdf_document_annotations_get_annotations (EvDocumentAnnotations *document_annota
 		i++;
 
 		/* Make sure annot has a unique name */
-		if (!ev_annotation_get_name (ev_annot)) {
-			gchar *name = g_strdup_printf ("annot-%d-%d", page->index, i);
-
-			ev_annotation_set_name (ev_annot, name);
-			g_free (name);
-		}
+		if (!ev_annotation_get_name (ev_annot))
+			annot_set_unique_name (ev_annot);
 
 		annot_mapping = g_new (EvMapping, 1);
 		annot_mapping->area.x1 = mapping->area.x1;
@@ -3091,6 +3097,38 @@ pdf_document_annotations_document_is_modified (EvDocumentAnnotations *document_a
 }
 
 static void
+pdf_document_annotations_remove_annotation (EvDocumentAnnotations *document_annotations,
+                                            EvAnnotation          *annot)
+{
+        PopplerPage   *poppler_page;
+        PdfDocument   *pdf_document;
+        EvPage        *page;
+        PopplerAnnot  *poppler_annot;
+        EvMappingList *mapping_list;
+        EvMapping     *annot_mapping;
+        GList         *list;
+
+        poppler_annot = POPPLER_ANNOT (g_object_get_data (G_OBJECT (annot), "poppler-annot"));
+        pdf_document = PDF_DOCUMENT (document_annotations);
+        page = ev_annotation_get_page (annot);
+        poppler_page = POPPLER_PAGE (page->backend_page);
+
+	poppler_page_remove_annot (poppler_page, poppler_annot);
+
+        /* We don't check for pdf_document->annots, if it were NULL then something is really wrong */
+        mapping_list = (EvMappingList *)g_hash_table_lookup (pdf_document->annots,
+                                                             GINT_TO_POINTER (page->index));
+        if (mapping_list) {
+                annot_mapping = ev_mapping_list_find (mapping_list, annot);
+                ev_mapping_list_remove (mapping_list, annot_mapping);
+		if (ev_mapping_list_length (mapping_list) == 0)
+			g_hash_table_remove (pdf_document->annots, GINT_TO_POINTER (page->index));
+        }
+
+        pdf_document->annots_modified = TRUE;
+}
+
+static void
 pdf_document_annotations_add_annotation (EvDocumentAnnotations *document_annotations,
 					 EvAnnotation          *annot,
 					 EvRectangle           *rect)
@@ -3106,7 +3144,6 @@ pdf_document_annotations_add_annotation (EvDocumentAnnotations *document_annotat
 	gdouble          height;
 	PopplerColor     poppler_color;
 	GdkColor         color;
-	gchar           *name;
 
 	pdf_document = PDF_DOCUMENT (document_annotations);
 	page = ev_annotation_get_page (annot);
@@ -3117,7 +3154,22 @@ pdf_document_annotations_add_annotation (EvDocumentAnnotations *document_annotat
 	poppler_rect.x2 = rect->x2;
 	poppler_rect.y1 = height - rect->y2;
 	poppler_rect.y2 = height - rect->y1;
-	poppler_annot = poppler_annot_text_new (pdf_document->document, &poppler_rect);
+
+	switch (ev_annotation_get_annotation_type (annot)) {
+		case EV_ANNOTATION_TYPE_TEXT: {
+			EvAnnotationText    *text = EV_ANNOTATION_TEXT (annot);
+			EvAnnotationTextIcon icon;
+
+			poppler_annot = poppler_annot_text_new (pdf_document->document, &poppler_rect);
+
+			icon = ev_annotation_text_get_icon (text);
+			poppler_annot_text_set_icon (POPPLER_ANNOT_TEXT (poppler_annot),
+						     get_poppler_annot_text_icon (icon));
+			}
+			break;
+		default:
+			g_assert_not_reached ();
+	}
 
 	ev_annotation_get_color (annot, &color);
 	poppler_color.red = color.red;
@@ -3147,14 +3199,6 @@ pdf_document_annotations_add_annotation (EvDocumentAnnotations *document_annotat
 			poppler_annot_markup_set_label (POPPLER_ANNOT_MARKUP (poppler_annot), label);
 	}
 
-	if (EV_IS_ANNOTATION_TEXT (annot)) {
-		EvAnnotationText    *text = EV_ANNOTATION_TEXT (annot);
-		EvAnnotationTextIcon icon;
-
-		icon = ev_annotation_text_get_icon (text);
-		poppler_annot_text_set_icon (POPPLER_ANNOT_TEXT (poppler_annot),
-					     get_poppler_annot_text_icon (icon));
-	}
 	poppler_page_add_annot (poppler_page, poppler_annot);
 
 	annot_mapping = g_new (EvMapping, 1);
@@ -3176,16 +3220,12 @@ pdf_document_annotations_add_annotation (EvDocumentAnnotations *document_annotat
 		mapping_list = NULL;
 	}
 
+	annot_set_unique_name (annot);
+
 	if (mapping_list) {
 		list = ev_mapping_list_get_list (mapping_list);
-		name = g_strdup_printf ("annot-%d-%d", page->index, g_list_length (list) + 1);
-		ev_annotation_set_name (annot, name);
-		g_free (name);
 		list = g_list_append (list, annot_mapping);
 	} else {
-		name = g_strdup_printf ("annot-%d-0", page->index);
-		ev_annotation_set_name (annot, name);
-		g_free (name);
 		list = g_list_append (list, annot_mapping);
 		mapping_list = ev_mapping_list_new (page->index, list, (GDestroyNotify)g_object_unref);
 		g_hash_table_insert (pdf_document->annots,
@@ -3260,6 +3300,7 @@ pdf_document_document_annotations_iface_init (EvDocumentAnnotationsInterface *if
 	iface->document_is_modified = pdf_document_annotations_document_is_modified;
 	iface->add_annotation = pdf_document_annotations_add_annotation;
 	iface->save_annotation = pdf_document_annotations_save_annotation;
+	iface->remove_annotation = pdf_document_annotations_remove_annotation;
 }
 
 /* Attachments */

@@ -1223,3 +1223,39 @@ ev_page_accessible_new (EvViewAccessible *view_accessible,
 
         return EV_PAGE_ACCESSIBLE (atk_page);
 }
+
+AtkObject *
+ev_page_accessible_get_accessible_for_mapping (EvPageAccessible *page_accessible,
+					       EvMapping        *mapping)
+{
+	gint i;
+
+	ev_page_accessible_initialize_children (page_accessible);
+	if (!mapping || !page_accessible->priv->children)
+		return NULL;
+
+	for (i = 0; i < page_accessible->priv->children->len; i++) {
+		AtkObject *child;
+
+		child = g_ptr_array_index (page_accessible->priv->children, i);
+		if (EV_IS_FORM_FIELD_ACCESSIBLE (child) &&
+		    ev_form_field_accessible_get_field (EV_FORM_FIELD_ACCESSIBLE (child)) == mapping->data)
+			return child;
+	}
+
+	return NULL;
+}
+
+void
+ev_page_accessible_update_element_state (EvPageAccessible *page_accessible,
+					 EvMapping        *mapping)
+{
+	AtkObject *child;
+
+	child = ev_page_accessible_get_accessible_for_mapping (page_accessible, mapping);
+	if (!child)
+		return;
+
+	if (EV_IS_FORM_FIELD_ACCESSIBLE (child))
+		ev_form_field_accessible_update_state (EV_FORM_FIELD_ACCESSIBLE (child));
+}

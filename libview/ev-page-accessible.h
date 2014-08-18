@@ -51,6 +51,10 @@ EvPageAccessible *ev_page_accessible_new                 (EvViewAccessible *view
 gint              ev_page_accessible_get_page            (EvPageAccessible *page_accessible);
 EvViewAccessible *ev_page_accessible_get_view_accessible (EvPageAccessible *page_accessible);
 EvView           *ev_page_accessible_get_view            (EvPageAccessible *page_accessible);
+AtkObject        *ev_page_accessible_get_accessible_for_mapping (EvPageAccessible *page_accessible,
+								 EvMapping        *mapping);
+void              ev_page_accessible_update_element_state (EvPageAccessible *page_accessible,
+							   EvMapping        *mapping);
 
 #endif  /* __EV_PAGE_ACCESSIBLE_H__ */
 

@@ -17,16 +17,16 @@ SUBDIRS += \
 	po \
 	help
 
-if ENABLE_TESTS
-SUBDIRS += test
-endif
-
 if ENABLE_THUMBNAILER
 SUBDIRS += thumbnailer
 endif
 
 if ENABLE_PREVIEWER
 SUBDIRS += previewer
+endif
+
+if ENABLE_BROWSER_PLUGIN
+SUBDIRS += browser-plugin
 endif
 
 NULL =

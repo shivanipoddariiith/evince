@@ -51,7 +51,6 @@
 #include "ev-document-images.h"
 #include "ev-document-links.h"
 #include "ev-document-annotations.h"
-#include "ev-document-type-builtins.h"
 #include "ev-document-misc.h"
 #include "ev-file-exporter.h"
 #include "ev-file-helpers.h"
@@ -89,6 +88,7 @@
 #include "ev-zoom-action.h"
 #include "ev-toolbar.h"
 #include "ev-bookmarks.h"
+#include "ev-recent-view.h"
 
 #ifdef ENABLE_DBUS
 #include "ev-gdbus-generated.h"
@@ -182,6 +182,9 @@ struct _EvWindowPrivate {
 	GtkWidget    *attachment_popup;
 	GList        *attach_list;
 
+	/* For bookshelf view of recent items*/
+	EvRecentView *recent_view;
+
 	/* Document */
 	EvDocumentModel *model;
 	char *uri;
@@ -267,8 +270,6 @@ struct _EvWindowPrivate {
 
 #define EV_TOOLBARS_FILENAME "evince-toolbar.xml"
 
-#define MAX_RECENT_ITEM_LEN (40)
-
 #define TOOLBAR_RESOURCE_PATH "/org/gnome/evince/shell/ui/toolbar.xml"
 
 #define FULLSCREEN_POPUP_TIMEOUT 2
@@ -336,6 +337,9 @@ static void     ev_window_popup_cmd_copy_image          (GSimpleAction    *actio
 static void     ev_window_popup_cmd_annot_properties    (GSimpleAction    *action,
 							 GVariant         *parameter,
 							 gpointer          user_data);
+static void     ev_window_popup_cmd_remove_annotation   (GSimpleAction    *action,
+							 GVariant         *parameter,
+							 gpointer          user_data);
 static void	ev_window_popup_cmd_open_attachment     (GSimpleAction    *action,
 							 GVariant         *parameter,
 							 gpointer          user_data);
@@ -368,6 +372,11 @@ static void     ev_window_setup_bookmarks               (EvWindow         *windo
 static void     ev_window_show_find_bar                 (EvWindow         *ev_window,
 							 gboolean          restart);
 static void     ev_window_close_find_bar                (EvWindow         *ev_window);
+static void     ev_window_clear_find_job                (EvWindow         *ev_window);
+static void     ev_window_destroy_recent_view           (EvWindow         *ev_window);
+static void     recent_view_item_activated_cb           (EvRecentView     *recent_view,
+                                                         const char       *uri,
+                                                         EvWindow         *ev_window);
 
 static gchar *nautilus_sendto = NULL;
 
@@ -382,6 +391,12 @@ get_screen_dpi (EvWindow *window)
 	return ev_document_misc_get_screen_dpi (screen);
 }
 
+static gboolean
+ev_window_is_recent_view (EvWindow *ev_window)
+{
+	return ev_toolbar_get_mode (EV_TOOLBAR (ev_window->priv->toolbar)) == EV_TOOLBAR_MODE_RECENT_VIEW;
+}
+
 static void
 ev_window_set_action_enabled (EvWindow   *ev_window,
 			      const char *name,
@@ -394,9 +409,10 @@ ev_window_set_action_enabled (EvWindow   *ev_window,
 }
 
 static void
-ev_window_setup_action_sensitivity (EvWindow *ev_window)
+ev_window_update_actions_sensitivity (EvWindow *ev_window)
 {
 	EvDocument *document = ev_window->priv->document;
+	EvView     *view = EV_VIEW (ev_window->priv->view);
 	const EvDocumentInfo *info = NULL;
 	gboolean has_document = FALSE;
 	gboolean ok_to_print = TRUE;
@@ -404,13 +420,21 @@ ev_window_setup_action_sensitivity (EvWindow *ev_window)
 	gboolean has_properties = TRUE;
 	gboolean override_restrictions = TRUE;
 	gboolean can_get_text = FALSE;
-	gboolean has_pages = FALSE;
 	gboolean can_find = FALSE;
+	gboolean can_find_in_page = FALSE;
+	gboolean presentation_mode;
+	gboolean recent_view_mode;
+	gboolean dual_mode = FALSE;
+	gboolean has_pages = FALSE;
+	int      n_pages = 0, page = -1;
 
 	if (document) {
 		has_document = TRUE;
-		has_pages = ev_document_get_n_pages (document) > 0;
 		info = ev_document_get_info (document);
+		page = ev_document_model_get_page (ev_window->priv->model);
+		n_pages = ev_document_get_n_pages (ev_window->priv->document);
+		has_pages = n_pages > 0;
+		dual_mode = ev_document_model_get_dual_page (ev_window->priv->model);
 	}
 
 	if (!info || info->fields_mask == 0) {
@@ -420,7 +444,7 @@ ev_window_setup_action_sensitivity (EvWindow *ev_window)
 	if (has_document && EV_IS_SELECTION (document)) {
 		can_get_text = TRUE;
 	}
-	
+
 	if (has_pages && EV_IS_DOCUMENT_FIND (document)) {
 		can_find = TRUE;
 	}
@@ -449,76 +473,109 @@ ev_window_setup_action_sensitivity (EvWindow *ev_window)
 		ok_to_print = FALSE;
 	}
 
+	/* Get modes */
+	presentation_mode = EV_WINDOW_IS_PRESENTATION (ev_window);
+	recent_view_mode = ev_window_is_recent_view (ev_window);
+
 	/* File menu */
 	ev_window_set_action_enabled (ev_window, "open-copy", has_document);
-	ev_window_set_action_enabled (ev_window, "save-copy", has_document && ok_to_copy);
-	ev_window_set_action_enabled (ev_window, "print", has_pages && ok_to_print);
-	ev_window_set_action_enabled (ev_window, "show-properties", has_document && has_properties);
-	ev_window_set_action_enabled (ev_window, "open-containing-folder", has_document);
-	ev_window_set_action_enabled (ev_window, "send-to",
-				      has_document && ev_window->priv->has_mailto_handler);
-	ev_window_set_action_enabled (ev_window, "presentation", has_document);
+	ev_window_set_action_enabled (ev_window, "save-copy", has_document &&
+				      ok_to_copy && !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "print", has_pages &&
+				      ok_to_print && !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "show-properties",
+				      has_document && has_properties &&
+				      !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "open-containing-folder",
+				      has_document && !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "send-to", has_document &&
+				      ev_window->priv->has_mailto_handler &&
+				      !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "fullscreen",
+				      has_document && !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "presentation",
+				      has_document && !recent_view_mode);
 
         /* Edit menu */
-	ev_window_set_action_enabled (ev_window, "select-all", has_pages && can_get_text);
-	ev_window_set_action_enabled (ev_window, "find", can_find);
-	ev_window_set_action_enabled (ev_window, "rotate-left", has_pages);
-	ev_window_set_action_enabled (ev_window, "rotate-right", has_pages);
+	ev_window_set_action_enabled (ev_window, "select-all", has_pages &&
+				      can_get_text && !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "find", can_find &&
+				      !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "rotate-left", has_pages &&
+				      !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "rotate-right", has_pages &&
+				      !recent_view_mode);
 
         /* View menu */
-	ev_window_set_action_enabled (ev_window, "continuous", has_pages);
-	ev_window_set_action_enabled (ev_window, "dual-page", has_pages);
-	ev_window_set_action_enabled (ev_window, "dual-odd-left", has_pages);
-	ev_window_set_action_enabled (ev_window, "reload", has_pages);
-	ev_window_set_action_enabled (ev_window, "auto-scroll", has_pages);
-	ev_window_set_action_enabled (ev_window, "inverted-colors", has_pages);
+	ev_window_set_action_enabled (ev_window, "continuous", has_pages &&
+				      !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "dual-page", has_pages &&
+				      !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "dual-odd-left", has_pages &&
+				      !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "reload", has_pages &&
+				      !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "auto-scroll", has_pages &&
+				      !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "inverted-colors",
+				      has_pages && !recent_view_mode);
 
 	/* Bookmarks menu */
 	ev_window_set_action_enabled (ev_window, "add-bookmark",
-					has_pages && ev_window->priv->bookmarks);
+				      has_pages && ev_window->priv->bookmarks &&
+				      !recent_view_mode);
 
-        ev_window_update_actions_sensitivity (ev_window);
-}
+	/* Other actions that must be disabled in recent view, in
+	 * case they have a shortcut or gesture associated
+	 */
+	ev_window_set_action_enabled (ev_window, "save-settings", !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "show-side-pane", !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "goto-bookmark", !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "scroll-forward", !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "scroll-backwards", !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "sizing-mode", !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "zoom", !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "escape", !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "open-menu", !recent_view_mode);
 
-static void
-ev_window_update_actions_sensitivity (EvWindow *ev_window)
-{
-	EvView *view = EV_VIEW (ev_window->priv->view);
-	int n_pages = 0, page = -1;
-	gboolean has_pages = FALSE;
-	gboolean presentation_mode;
-	gboolean can_find_in_page = FALSE;
-	gboolean dual_mode = FALSE;
-
-	if (ev_window->priv->document) {
-		page = ev_document_model_get_page (ev_window->priv->model);
-		n_pages = ev_document_get_n_pages (ev_window->priv->document);
-		has_pages = n_pages > 0;
-		dual_mode = ev_document_model_get_dual_page (ev_window->priv->model);
-	}
+	/* Same for popups specific actions */
+	ev_window_set_action_enabled (ev_window, "open-link", !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "open-link-new-window", !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "go-to-link", !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "copy-link-address", !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "save-image", !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "copy-image", !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "open-attachment", !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "save-attachment", !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "annot-properties", !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "remove-annot", !recent_view_mode);
 
 	can_find_in_page = (ev_window->priv->find_job &&
 			    ev_job_find_has_results (EV_JOB_FIND (ev_window->priv->find_job)));
 
 	ev_window_set_action_enabled (ev_window, "copy",
 					has_pages &&
-					ev_view_get_has_selection (view));
+					ev_view_get_has_selection (view) &&
+					!recent_view_mode);
 	ev_window_set_action_enabled (ev_window, "find-next",
-				      has_pages && can_find_in_page);
+				      has_pages && can_find_in_page &&
+				      !recent_view_mode);
 	ev_window_set_action_enabled (ev_window, "find-previous",
-				      has_pages && can_find_in_page);
-	ev_window_set_action_enabled (ev_window, "dual-odd-left", dual_mode);
-
-	presentation_mode = EV_WINDOW_IS_PRESENTATION (ev_window);
+				      has_pages && can_find_in_page &&
+				      !recent_view_mode);
+	ev_window_set_action_enabled (ev_window, "dual-odd-left", dual_mode &&
+				      !recent_view_mode);
 
 	ev_window_set_action_enabled (ev_window, "zoom-in",
 				      has_pages &&
 				      ev_view_can_zoom_in (view) &&
-				      !presentation_mode);
+				      !presentation_mode &&
+				      !recent_view_mode);
 	ev_window_set_action_enabled (ev_window, "zoom-out",
 				      has_pages &&
 				      ev_view_can_zoom_out (view) &&
-				      !presentation_mode);
+				      !presentation_mode &&
+				      !recent_view_mode);
 
         /* Go menu */
 	if (has_pages) {
@@ -537,15 +594,18 @@ ev_window_update_actions_sensitivity (EvWindow *ev_window)
 
 	ev_window_set_action_enabled (ev_window, "go-back-history",
 				      !ev_history_is_frozen (ev_window->priv->history) &&
-				      ev_history_can_go_back (ev_window->priv->history));
+				      ev_history_can_go_back (ev_window->priv->history) &&
+				      !recent_view_mode);
 	ev_window_set_action_enabled (ev_window, "go-forward-history",
 				      !ev_history_is_frozen (ev_window->priv->history) &&
-				      ev_history_can_go_forward (ev_window->priv->history));
+				      ev_history_can_go_forward (ev_window->priv->history) &&
+				      !recent_view_mode);
 
 	ev_window_set_action_enabled (ev_window, "caret-navigation",
 				      has_pages &&
 				      ev_view_supports_caret_navigation (view) &&
-				      !presentation_mode);
+				      !presentation_mode &&
+				      !recent_view_mode);
 }
 
 static void
@@ -1395,7 +1455,7 @@ override_restrictions_changed (GSettings *settings,
 			       gchar     *key,
 			       EvWindow  *ev_window)
 {
-	ev_window_setup_action_sensitivity (ev_window);
+	ev_window_update_actions_sensitivity (ev_window);
 }
 
 #ifdef HAVE_DESKTOP_SCHEMAS
@@ -1404,7 +1464,7 @@ lockdown_changed (GSettings   *lockdown,
 		  const gchar *key,
 		  EvWindow    *ev_window)
 {
-	ev_window_setup_action_sensitivity (ev_window);
+	ev_window_update_actions_sensitivity (ev_window);
 }
 #endif
 
@@ -1455,7 +1515,7 @@ ev_window_setup_document (EvWindow *ev_window)
 	}
 #endif
 
-	ev_window_setup_action_sensitivity (ev_window);
+	ev_window_update_actions_sensitivity (ev_window);
 
 	if (ev_window->priv->properties) {
 		ev_properties_dialog_set_document (EV_PROPERTIES_DIALOG (ev_window->priv->properties),
@@ -1493,6 +1553,26 @@ ev_window_setup_document (EvWindow *ev_window)
 }
 
 static void
+ev_window_set_document_metadata (EvWindow *window)
+{
+	const EvDocumentInfo *info;
+
+	if (!window->priv->metadata)
+		return;
+
+	info = ev_document_get_info (window->priv->document);
+	if (info->fields_mask & EV_DOCUMENT_INFO_TITLE && info->title && info->title[0] != '\0')
+		ev_metadata_set_string (window->priv->metadata, "title", info->title);
+	else
+		ev_metadata_set_string (window->priv->metadata, "title", "");
+
+	if (info->fields_mask & EV_DOCUMENT_INFO_AUTHOR && info->author && info->author[0] != '\0')
+		ev_metadata_set_string (window->priv->metadata, "author", info->author);
+	else
+		ev_metadata_set_string (window->priv->metadata, "author", "");
+}
+
+static void
 ev_window_set_document (EvWindow *ev_window, EvDocument *document)
 {
 	if (ev_window->priv->document == document)
@@ -1504,6 +1584,8 @@ ev_window_set_document (EvWindow *ev_window, EvDocument *document)
 
 	ev_window_set_message_area (ev_window, NULL);
 
+	ev_window_set_document_metadata (ev_window);
+
 	if (ev_document_get_n_pages (document) <= 0) {
 		ev_window_warning_message (ev_window, "%s",
 					   _("The document contains no pages"));
@@ -1511,6 +1593,8 @@ ev_window_set_document (EvWindow *ev_window, EvDocument *document)
 		ev_window_warning_message (ev_window, "%s",
 					   _("The document contains only empty pages"));
 	}
+
+	ev_window_destroy_recent_view (ev_window);
 
 	if (EV_WINDOW_IS_PRESENTATION (ev_window)) {
 		gint current_page;
@@ -2210,6 +2294,47 @@ ev_window_open_document (EvWindow       *ev_window,
 				  ev_window);
 }
 
+void
+ev_window_open_recent_view (EvWindow *ev_window)
+{
+	if (ev_window->priv->recent_view)
+		return;
+
+	gtk_widget_hide (ev_window->priv->hpaned);
+	gtk_widget_hide (ev_window->priv->find_bar);
+
+	ev_window->priv->recent_view = EV_RECENT_VIEW (ev_recent_view_new ());
+	g_signal_connect_object (ev_window->priv->recent_view,
+				 "item-activated",
+				 G_CALLBACK (recent_view_item_activated_cb),
+				 ev_window, 0);
+	gtk_box_pack_start (GTK_BOX (ev_window->priv->main_box),
+			    GTK_WIDGET (ev_window->priv->recent_view),
+			    TRUE, TRUE, 0);
+
+	gtk_widget_show (GTK_WIDGET (ev_window->priv->recent_view));
+	ev_toolbar_set_mode (EV_TOOLBAR (ev_window->priv->toolbar),
+			     EV_TOOLBAR_MODE_RECENT_VIEW);
+	ev_window_title_set_type (ev_window->priv->title, EV_WINDOW_TITLE_RECENT);
+
+	ev_window_update_actions_sensitivity (ev_window);
+}
+
+static void
+ev_window_destroy_recent_view (EvWindow *ev_window)
+{
+	if (!ev_window->priv->recent_view)
+		return;
+
+	gtk_widget_destroy (GTK_WIDGET (ev_window->priv->recent_view));
+	ev_window->priv->recent_view = NULL;
+	gtk_widget_show (ev_window->priv->hpaned);
+	ev_toolbar_set_mode (EV_TOOLBAR (ev_window->priv->toolbar),
+			     EV_TOOLBAR_MODE_NORMAL);
+	ev_window_title_set_type (ev_window->priv->title, EV_WINDOW_TITLE_DOCUMENT);
+	ev_window_update_actions_sensitivity (ev_window);
+}
+
 static void
 ev_window_reload_local (EvWindow *ev_window)
 {
@@ -2524,18 +2649,6 @@ ev_window_cmd_file_open_copy (GSimpleAction *action,
 	EvWindow *window = user_data;
 
 	ev_window_open_copy_at_dest (window, NULL);
-}
-
-static void
-ev_window_cmd_file_open_recent (GSimpleAction *action,
-				GVariant      *parameter,
-				gpointer       user_data)
-{
-	EvWindow *window = user_data;
-
-	ev_application_open_uri_at_dest (EV_APP, g_variant_get_string (parameter, NULL),
-					 gtk_window_get_screen (GTK_WINDOW (window)),
-					 NULL, 0, NULL, gtk_get_current_event_time ());
 }
 
 static void
@@ -4018,6 +4131,9 @@ ev_window_run_fullscreen (EvWindow *window)
 	g_object_unref (window->priv->main_box);
 
 	window->priv->fs_toolbar = ev_toolbar_new (window);
+	ev_toolbar_set_mode (EV_TOOLBAR (window->priv->fs_toolbar),
+		             EV_TOOLBAR_MODE_FULLSCREEN);
+
 	ev_window_update_links_model (window);
 	g_signal_connect (ev_toolbar_get_page_selector (EV_TOOLBAR (window->priv->fs_toolbar)),
 			  "activate-link",
@@ -4036,10 +4152,6 @@ ev_window_run_fullscreen (EvWindow *window)
 
 	gtk_container_add (GTK_CONTAINER (window), window->priv->fs_overlay);
 	gtk_widget_show (window->priv->fs_overlay);
-
-	g_object_set (G_OBJECT (window->priv->scrolled_window),
-		      "shadow-type", GTK_SHADOW_NONE,
-		      NULL);
 
 	ev_document_model_set_fullscreen (window->priv->model, TRUE);
 	ev_window_update_fullscreen_action (window);
@@ -4078,10 +4190,6 @@ ev_window_stop_fullscreen (EvWindow *window,
 	g_object_unref (window->priv->main_box);
 
 	ev_window_remove_fullscreen_timeout (window);
-
-	g_object_set (G_OBJECT (window->priv->scrolled_window),
-		      "shadow-type", GTK_SHADOW_IN,
-		      NULL);
 
 	ev_document_model_set_fullscreen (window->priv->model, FALSE);
 	ev_window_update_fullscreen_action (window);
@@ -4903,6 +5011,7 @@ view_menu_annot_popup (EvWindow     *ev_window,
 	GAction *action;
 	gboolean show_annot_props = FALSE;
 	gboolean show_attachment = FALSE;
+	gboolean can_remove_annots;
 
 	g_clear_object (&ev_window->priv->annot);
 	if (annot) {
@@ -4926,8 +5035,13 @@ view_menu_annot_popup (EvWindow     *ev_window,
 		}
 	}
 
+	can_remove_annots = ev_document_annotations_can_remove_annotation (EV_DOCUMENT_ANNOTATIONS (ev_window->priv->document));
+
 	action = g_action_map_lookup_action (G_ACTION_MAP (ev_window), "annot-properties");
 	g_simple_action_set_enabled (G_SIMPLE_ACTION (action), show_annot_props);
+
+	action = g_action_map_lookup_action (G_ACTION_MAP (ev_window), "remove-annot");
+	g_simple_action_set_enabled (G_SIMPLE_ACTION (action), annot != NULL && can_remove_annots);
 
 	action = g_action_map_lookup_action (G_ACTION_MAP (ev_window), "open-attachment");
 	g_simple_action_set_enabled (G_SIMPLE_ACTION (action), show_attachment);
@@ -5019,6 +5133,16 @@ find_sidebar_result_activated_cb (EvFindSidebar *find_sidebar,
 }
 
 static void
+recent_view_item_activated_cb (EvRecentView *recent_view,
+                               const char   *uri,
+                               EvWindow     *ev_window)
+{
+	ev_application_open_uri_at_dest (EV_APP, uri,
+					 gtk_window_get_screen (GTK_WINDOW (ev_window)),
+					 NULL, 0, NULL, gtk_get_current_event_time ());
+}
+
+static void
 ev_window_update_find_status_message (EvWindow *ev_window)
 {
 	gchar *message;
@@ -5061,6 +5185,7 @@ ev_window_find_job_finished_cb (EvJobFind *job,
 				EvWindow  *ev_window)
 {
 	ev_window_update_find_status_message (ev_window);
+	ev_window_clear_find_job (ev_window);
 }
 
 /**
@@ -5649,7 +5774,6 @@ ev_window_class_init (EvWindowClass *ev_window_class)
 static const GActionEntry actions[] = {
 	{ "open", ev_window_cmd_file_open },
 	{ "open-copy", ev_window_cmd_file_open_copy },
-	{ "open-recent", ev_window_cmd_file_open_recent, "s" },
 	{ "save-copy", ev_window_cmd_save_as },
 	{ "send-to", ev_window_cmd_send_to },
 	{ "open-containing-folder", ev_window_cmd_open_containing_folder },
@@ -5694,7 +5818,6 @@ static const GActionEntry actions[] = {
 	{ "escape", ev_window_cmd_escape },
 	{ "open-menu", ev_window_cmd_action_menu },
 	{ "caret-navigation", NULL, NULL, "false", ev_window_cmd_view_toggle_caret_navigation },
-
 	/* Popups specific items */
 	{ "open-link", ev_window_popup_cmd_open_link },
 	{ "open-link-new-window", ev_window_popup_cmd_open_link_new_window },
@@ -5704,7 +5827,8 @@ static const GActionEntry actions[] = {
 	{ "copy-image", ev_window_popup_cmd_copy_image },
 	{ "open-attachment", ev_window_popup_cmd_open_attachment },
 	{ "save-attachment", ev_window_popup_cmd_save_attachment_as },
-	{ "annot-properties", ev_window_popup_cmd_annot_properties }
+	{ "annot-properties", ev_window_popup_cmd_annot_properties },
+	{ "remove-annot", ev_window_popup_cmd_remove_annotation }
 };
 
 static void
@@ -5760,6 +5884,14 @@ view_annot_added (EvView       *view,
 {
 	ev_sidebar_annotations_annot_added (EV_SIDEBAR_ANNOTATIONS (window->priv->sidebar_annots),
 					    annot);
+}
+
+static void
+view_annot_removed (EvView       *view,
+		    EvAnnotation *annot,
+		    EvWindow     *window)
+{
+	ev_sidebar_annotations_annot_removed (EV_SIDEBAR_ANNOTATIONS (window->priv->sidebar_annots));
 }
 
 static void
@@ -6346,6 +6478,17 @@ ev_window_popup_cmd_annot_properties (GSimpleAction *action,
 }
 
 static void
+ev_window_popup_cmd_remove_annotation (GSimpleAction *action,
+				       GVariant      *parameter,
+				       gpointer       user_data)
+{
+	EvWindow *window = user_data;
+
+	ev_view_remove_annotation (EV_VIEW (window->priv->view),
+				   window->priv->annot);
+}
+
+static void
 ev_window_popup_cmd_open_attachment (GSimpleAction *action,
 				     GVariant      *parameter,
 				     gpointer       user_data)
@@ -6707,7 +6850,6 @@ ev_window_init (EvWindow *ev_window)
 	ev_window->priv->page_mode = PAGE_MODE_DOCUMENT;
 	ev_window->priv->chrome = EV_CHROME_NORMAL;
         ev_window->priv->presentation_mode_inhibit_id = 0;
-	ev_window->priv->title = ev_window_title_new (ev_window);
 
 	ev_window->priv->history = ev_history_new (ev_window->priv->model);
 	g_signal_connect (ev_window->priv->history, "activate-link",
@@ -6748,6 +6890,9 @@ ev_window_init (EvWindow *ev_window)
 	gtk_header_bar_set_show_close_button (GTK_HEADER_BAR (ev_window->priv->toolbar), TRUE);
 	gtk_window_set_titlebar (GTK_WINDOW (ev_window), ev_window->priv->toolbar);
 	gtk_widget_show (ev_window->priv->toolbar);
+
+	/* Window title */
+	ev_window->priv->title = ev_window_title_new (ev_window);
 
 	g_signal_connect (ev_toolbar_get_page_selector (EV_TOOLBAR (ev_window->priv->toolbar)),
 			  "activate-link",
@@ -6856,10 +7001,7 @@ ev_window_init (EvWindow *ev_window)
 	ev_window->priv->view_box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
 
 	overlay = gtk_overlay_new ();
-	ev_window->priv->scrolled_window =
-		GTK_WIDGET (g_object_new (GTK_TYPE_SCROLLED_WINDOW,
-					  "shadow-type", GTK_SHADOW_IN,
-					  NULL));
+	ev_window->priv->scrolled_window = gtk_scrolled_window_new (NULL, NULL);
 	gtk_container_add (GTK_CONTAINER (overlay), ev_window->priv->scrolled_window);
 	gtk_widget_show (ev_window->priv->scrolled_window);
 
@@ -6908,6 +7050,9 @@ ev_window_init (EvWindow *ev_window)
 				 ev_window, 0);
 	g_signal_connect_object (ev_window->priv->view, "annot-added",
 				 G_CALLBACK (view_annot_added),
+				 ev_window, 0);
+	g_signal_connect_object (ev_window->priv->view, "annot-removed",
+				 G_CALLBACK (view_annot_removed),
 				 ev_window, 0);
 	g_signal_connect_object (ev_window->priv->view, "layers-changed",
 				 G_CALLBACK (view_layers_changed_cb),
@@ -7043,7 +7188,7 @@ ev_window_init (EvWindow *ev_window)
         gtk_window_set_hide_titlebar_when_maximized (GTK_WINDOW (ev_window), TRUE);
 
         ev_window_sizing_mode_changed_cb (ev_window->priv->model, NULL, ev_window);
-	ev_window_setup_action_sensitivity (ev_window);
+	ev_window_update_actions_sensitivity (ev_window);
 
 	/* Drag and Drop */
 	gtk_drag_dest_set (GTK_WIDGET (ev_window),
@@ -7106,6 +7251,14 @@ ev_window_get_document_model (EvWindow *ev_window)
 	g_return_val_if_fail (EV_WINDOW (ev_window), NULL);
 
 	return ev_window->priv->model;
+}
+
+GtkWidget *
+ev_window_get_toolbar (EvWindow *ev_window)
+{
+	g_return_val_if_fail (EV_WINDOW (ev_window), NULL);
+
+	return ev_window->priv->toolbar;
 }
 
 void

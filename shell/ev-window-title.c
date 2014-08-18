@@ -41,6 +41,7 @@ struct _EvWindowTitle
 	EvWindowTitleType type;
 	EvDocument *document;
 	char *uri;
+        char *doc_title;
 };
 
 static const BadTitleEntry bad_extensions[] = {
@@ -108,59 +109,63 @@ static void
 ev_window_title_update (EvWindowTitle *window_title)
 {
 	GtkWindow *window = GTK_WINDOW (window_title->window);
-	char *title = NULL, *password_title, *p;
+	GtkHeaderBar *toolbar = GTK_HEADER_BAR (ev_window_get_toolbar (EV_WINDOW (window)));
+	char *title = NULL, *p;
+	char *subtitle = NULL, *title_header = NULL;
 
-	if (window_title->document != NULL) {
-		gchar *doc_title;
+        if (window_title->type == EV_WINDOW_TITLE_RECENT) {
+                gtk_header_bar_set_subtitle (toolbar, NULL);
+                gtk_window_set_title (window, _("Recent Documents"));
+                return;
+        }
 
-		doc_title = g_strdup (ev_document_get_title (window_title->document));
+	if (window_title->doc_title && window_title->uri) {
+                title = g_strdup (window_title->doc_title);
+                ev_window_title_sanitize_title (window_title, &title);
 
-		/* Make sure we get a valid title back */
-		if (doc_title != NULL) {
-			doc_title = g_strstrip (doc_title);
+		subtitle = get_filename_from_uri (window_title->uri);
 
-			if (doc_title[0] != '\0' &&
-			    g_utf8_validate (doc_title, -1, NULL)) {
-				title = g_strdup (doc_title);
-			}
+		title_header = title;
+		title = g_strdup_printf ("%s — %s", subtitle, title);
 
-			g_free (doc_title);
-		}
-	}
-
-	if (title && window_title->uri) {
-		char *tmp_title;
-		char *filename = get_filename_from_uri (window_title->uri);
-
-		ev_window_title_sanitize_title (window_title, &title);
-		tmp_title = g_strdup_printf ("%s — %s", filename, title);
-                g_free (title);
-                g_free (filename);
-
-                title = tmp_title;
+                for (p = title; *p; ++p) {
+                        /* an '\n' byte is always ASCII, no need for UTF-8 special casing */
+                        if (*p == '\n')
+                                *p = ' ';
+                }
 	} else if (window_title->uri) {
 		title = get_filename_from_uri (window_title->uri);
 	} else if (!title) {
 		title = g_strdup (_("Document Viewer"));
 	}
 
-	for (p = title; *p; ++p) {
-		/* an '\n' byte is always ASCII, no need for UTF-8 special casing */
-		if (*p == '\n')	*p = ' ';
-	}
-
 	switch (window_title->type) {
 	case EV_WINDOW_TITLE_DOCUMENT:
 		gtk_window_set_title (window, title);
+		if (title_header && subtitle) {
+			gtk_header_bar_set_title (toolbar, title_header);
+			gtk_header_bar_set_subtitle (toolbar, subtitle);
+		}
 		break;
-	case EV_WINDOW_TITLE_PASSWORD:
-		password_title = g_strdup_printf (_("%s — Password Required"), title);
+	case EV_WINDOW_TITLE_PASSWORD: {
+                gchar *password_title;
+
+		password_title = g_strdup_printf ("%s — %s", title, _("Password Required"));
 		gtk_window_set_title (window, password_title);
 		g_free (password_title);
+
+                gtk_header_bar_set_title (toolbar, _("Password Required"));
+                gtk_header_bar_set_subtitle (toolbar, title);
+        }
 		break;
+        case EV_WINDOW_TITLE_RECENT:
+                g_assert_not_reached ();
+                break;
 	}
 
 	g_free (title);
+	g_free (subtitle);
+	g_free (title_header);
 }
 
 EvWindowTitle *
@@ -189,7 +194,29 @@ void
 ev_window_title_set_document (EvWindowTitle *window_title,
 			      EvDocument    *document)
 {
+        if (window_title->document == document)
+                return;
+
 	window_title->document = document;
+        g_clear_pointer (&window_title->doc_title, g_free);
+
+	if (window_title->document != NULL) {
+		gchar *doc_title;
+
+		doc_title = g_strdup (ev_document_get_title (window_title->document));
+
+		/* Make sure we get a valid title back */
+		if (doc_title != NULL) {
+			doc_title = g_strstrip (doc_title);
+
+			if (doc_title[0] != '\0' &&
+                            g_utf8_validate (doc_title, -1, NULL)) {
+				window_title->doc_title = doc_title;
+			} else {
+                                g_free (doc_title);
+                        }
+		}
+	}
 
 	ev_window_title_update (window_title);
 }
@@ -198,6 +225,9 @@ void
 ev_window_title_set_uri (EvWindowTitle *window_title,
 			 const char    *uri)
 {
+        if (g_strcmp0 (uri, window_title->uri) == 0)
+                return;
+
 	g_free (window_title->uri);
 	window_title->uri = g_strdup (uri);
 
@@ -207,6 +237,7 @@ ev_window_title_set_uri (EvWindowTitle *window_title,
 void
 ev_window_title_free (EvWindowTitle *window_title)
 {
+        g_free (window_title->doc_title);
 	g_free (window_title->uri);
 	g_free (window_title);
 }

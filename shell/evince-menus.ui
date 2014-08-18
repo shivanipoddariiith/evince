@@ -21,6 +21,10 @@
   <menu id="appmenu">
     <section>
       <item>
+        <attribute name="label" translatable="yes">_New Window</attribute>
+        <attribute name="action">app.new</attribute>
+      </item>
+      <item>
         <attribute name="label" translatable="yes">_Help</attribute>
         <attribute name="action">app.help</attribute>
         <attribute name="accel">F1</attribute>
@@ -71,6 +75,24 @@
     </section>
     <section>
       <item>
+        <attribute name="label" translatable="yes">First Page</attribute>
+        <attribute name="action">win.go-first-page</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Previous Page</attribute>
+        <attribute name="action">win.go-previous-page</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Next Page</attribute>
+        <attribute name="action">win.go-next-page</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Last Page</attribute>
+        <attribute name="action">win.go-last-page</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
         <attribute name="label" translatable="yes">Zoom _In</attribute>
         <attribute name="action">win.zoom-in</attribute>
       </item>
@@ -106,11 +128,6 @@
       <item>
         <attribute name="label" translatable="yes">Op_en a Copy</attribute>
         <attribute name="action">win.open-copy</attribute>
-      </item>
-      <item>
-        <attribute name="label" translatable="yes">_Recent</attribute>
-        <link name="submenu" id="recent">
-        </link>
       </item>
       <item>
         <attribute name="label" translatable="yes">_Save a Copy…</attribute>
@@ -151,16 +168,6 @@
         <attribute name="action">win.save-settings</attribute>
       </item>
     </section>
-    <section>
-      <item>
-        <attribute name="label" translatable="yes">_First Page</attribute>
-        <attribute name="action">win.go-first-page</attribute>
-      </item>
-      <item>
-        <attribute name="label" translatable="yes">_Last Page</attribute>
-        <attribute name="action">win.go-last-page</attribute>
-      </item>
-    </section>
     <section id="bookmarks">
       <item>
         <attribute name="label" translatable="yes">_Add Bookmark</attribute>
@@ -181,13 +188,11 @@
         <attribute name="label" translatable="yes">Fit Pa_ge</attribute>
         <attribute name="action">win.sizing-mode</attribute>
         <attribute name="target">fit-page</attribute>
-        <attribute name="accel">f</attribute>
       </item>
       <item>
         <attribute name="label" translatable="yes">Fit _Width</attribute>
         <attribute name="action">win.sizing-mode</attribute>
         <attribute name="target">fit-width</attribute>
-        <attribute name="accel">w</attribute>
       </item>
       <item>
         <attribute name="label" translatable="yes">_Automatic</attribute>
@@ -278,6 +283,11 @@
       <item>
         <attribute name="label" translatable="yes">Annotation Properties…</attribute>
         <attribute name="action">win.annot-properties</attribute>
+        <attribute name='hidden-when'>action-disabled</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Remove Annotation</attribute>
+        <attribute name="action">win.remove-annot</attribute>
         <attribute name='hidden-when'>action-disabled</attribute>
       </item>
       <item>

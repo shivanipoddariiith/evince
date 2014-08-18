@@ -83,6 +83,7 @@ void		ev_window_open_document                  (EvWindow       *ev_window,
                                                           EvLinkDest     *dest,
                                                           EvWindowRunMode mode,
                                                           const gchar    *search_string);
+void            ev_window_open_recent_view               (EvWindow       *ev_window);
 gboolean	ev_window_is_empty	                 (const EvWindow *ev_window);
 void		ev_window_print_range                    (EvWindow       *ev_window,
                                                           int             first_page,
@@ -92,6 +93,7 @@ GMenuModel     *ev_window_get_bookmarks_menu             (EvWindow       *ev_win
 EvHistory      *ev_window_get_history                    (EvWindow       *ev_window);
 EvDocumentModel *ev_window_get_document_model            (EvWindow       *ev_window);
 void            ev_window_focus_view                     (EvWindow       *ev_window);
+GtkWidget      *ev_window_get_toolbar			 (EvWindow	 *ev_window);
 
 G_END_DECLS
 
