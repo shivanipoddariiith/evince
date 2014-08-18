@@ -62,6 +62,10 @@ EXTRA_DIST = \
 	autogen.sh \
 	MAINTAINERS
 
+@BEHAVE_INSTALLED_TESTS_RULE@
+INSTALLED_TESTS=test_file_open_button test_document_viewer_settings test_reload_doc test_print_file
+INSTALLED_TESTS_TYPE=session-exclusive
+
 CLEANFILES = \
 	$(nodist_appdata_DATA) \
 	$(NULL)

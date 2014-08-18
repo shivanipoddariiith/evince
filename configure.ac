@@ -114,6 +114,9 @@ fi
 
 AM_CONDITIONAL([PLATFORM_WIN32],[test "$with_platform" = "win32"])
 
+dnl Installed tests
+BEHAVE_INSTALLED_TESTS
+
 dnl Specify required versions of dependencies
 CAIRO_REQUIRED=1.10.0
 GLIB_REQUIRED=2.36.0
