@@ -101,6 +101,10 @@ DISTCHECK_CONFIGURE_FLAGS = \
 	--disable-silent-rules \
 	--enable-introspection
 
+@BEHAVE_INSTALLED_TESTS_RULE@
+INSTALLED_TESTS=test_file_open_button test_document_viewer_settings test_reload_doc test_print_file
+INSTALLED_TESTS_TYPE=session-exclusive
+
 # Ignore scrollkeeper issues for now.  @#*$& scrollkeeper
 distuninstallcheck_listfiles = find . -type f -print | grep -v scrollkeeper | grep -v /share/gnome/help/ | grep -v \.omf
 
